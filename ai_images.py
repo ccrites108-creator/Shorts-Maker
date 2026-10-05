@@ -166,7 +166,17 @@ def _asset_pattern(cpu=False):
     return r"bin-Linux-Ubuntu-.*x86_64-vulkan\.zip$"
 
 
+def check_supported():
+    """Intel Macs have no usable build of the picture program and too little graphics memory."""
+    import platform
+    if sys.platform == "darwin" and platform.machine() == "x86_64":
+        raise AIError("AI pictures can't run on this Mac (it has an Intel chip, and the picture program only supports "
+                      "Apple-chip Macs or Windows). Choose 'Stock footage' for pictures here, and make AI-picture "
+                      "videos on your Windows gaming PC.")
+
+
 def _find_program_url(cpu=False):
+    check_supported()
     try:
         with _open(SD_RELEASE_API) as r:
             release = json.loads(r.read())
@@ -339,6 +349,7 @@ def _command(exe, prompt, out_path, width, height, seed, cpu):
 def generate_image(prompt, out_path, quality="standard", seed=None, progress=None, use_cache=True):
     """Paint one AI picture into out_path (a .png). progress(seconds_so_far) is called while waiting.
     Returns True if an earlier picture for the very same prompt was reused instead of painting a new one."""
+    check_supported()
     if not find_sd_cli() or not ai_ready():
         raise AIError("AI images aren't set up yet.")
     cached = _cache_file(prompt, quality)
