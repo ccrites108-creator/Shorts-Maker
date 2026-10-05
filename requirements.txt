@@ -1,0 +1,7 @@
+edge-tts
+Pillow
+imageio-ffmpeg
+truststore
+
+# Optional, only for "--engine claude":
+# anthropic

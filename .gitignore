@@ -1,0 +1,5 @@
+settings.json
+output/
+ai/
+__pycache__/
+.version
