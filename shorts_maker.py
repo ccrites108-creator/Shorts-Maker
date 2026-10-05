@@ -515,7 +515,7 @@ def pixabay_search(kind, query, key):
     path = "/api/videos/" if kind == "videos" else "/api/"
     params = {"key": key, "q": query[:100], "per_page": 10, "safesearch": "true"}
     if kind == "photos":
-        params.update({"orientation": "vertical", "image_type": "photo"})
+        params.update({"orientation": "vertical", "image_type": "photo", "min_height": 1200, "order": "popular"})
     try:
         with _http_get(f"{base}{path}?{urllib.parse.urlencode(params)}", timeout=30) as r:
             return json.loads(r.read()).get("hits", [])
@@ -528,9 +528,41 @@ def pixabay_search(kind, query, key):
         return []
 
 
-def find_visual_pixabay(queries, used, key, tmp, idx):
-    """Return ('image', path) or ('video', path) from Pixabay, else None. Vertical photos come first
-    because most Pixabay videos are wide and would be cropped to the middle."""
+def _pixabay_clip(hit, need):
+    """Pick the best size of one Pixabay video: sharp (about 1080p) but not huge. Returns (url, w, h) or None."""
+    sizes = hit.get("videos", {})
+    for name in ("large", "medium", "small"):
+        v = sizes.get(name) or {}
+        if v.get("url") and (v.get("height") or 1080) >= 720:
+            return v["url"], v.get("width") or 0, v.get("height") or 0
+    v = sizes.get("medium") or sizes.get("small") or sizes.get("large") or {}
+    return (v["url"], v.get("width") or 0, v.get("height") or 0) if v.get("url") else None
+
+
+def find_visual_pixabay(queries, used, key, tmp, idx, need=0):
+    """Return ('video', path) or ('image', path) from Pixabay, else None. Moving footage looks far better than
+    still photos, so videos come first (long enough clips and vertical ones are preferred); then sharp vertical photos."""
+    for q in queries:
+        hits = [h for h in pixabay_search("videos", q, key) if ("pxb-v", h.get("id")) not in used]
+
+        def score(h):
+            clip = _pixabay_clip(h, need)
+            if not clip:
+                return 99
+            tall = clip[2] >= clip[1] and clip[1] > 0
+            long_enough = (h.get("duration") or 0) >= need
+            return (0 if long_enough else 2) + (0 if tall else 1)
+        for hit in sorted(hits, key=score):  # sorted() is stable, so search relevance still breaks ties
+            clip = _pixabay_clip(hit, need)
+            if not clip:
+                continue
+            path = os.path.join(tmp, f"scene{idx}_bg.mp4")
+            try:
+                download(clip[0], path)
+            except OSError:
+                continue
+            used.add(("pxb-v", hit.get("id")))
+            return "video", path
     for q in queries:
         for hit in pixabay_search("photos", q, key):
             if ("pxb-p", hit.get("id")) in used:
@@ -545,31 +577,17 @@ def find_visual_pixabay(queries, used, key, tmp, idx):
                     return "image", path
                 except OSError:
                     continue
-        for hit in pixabay_search("videos", q, key):
-            if ("pxb-v", hit.get("id")) in used:
-                continue
-            sizes = hit.get("videos", {})
-            pick = sizes.get("medium") or sizes.get("small") or sizes.get("large") or {}
-            if not pick.get("url"):
-                continue
-            path = os.path.join(tmp, f"scene{idx}_bg.mp4")
-            try:
-                download(pick["url"], path)
-            except OSError:
-                continue
-            used.add(("pxb-v", hit.get("id")))
-            return "video", path
     return None
 
 
-def find_visual(queries, used, settings, tmp, idx):
+def find_visual(queries, used, settings, tmp, idx, need=0):
     """Look for a picture or clip with whichever stock source has a key. Pexels first, then Pixabay."""
     if settings.get("pexels_key"):
         found = find_visual_pexels(queries, used, settings["pexels_key"], tmp, idx)
         if found:
             return found
     if settings.get("pixabay_key"):
-        return find_visual_pixabay(queries, used, settings["pixabay_key"], tmp, idx)
+        return find_visual_pixabay(queries, used, settings["pixabay_key"], tmp, idx, need)
     return None
 
 
@@ -852,6 +870,9 @@ def run_ffmpeg(cmd, what):
         raise PipelineError(f"A video step failed ({what}):\n{r.stderr[-1200:]}")
 
 
+GRADE = "eq=contrast=1.08:saturation=1.18:brightness=0.01,unsharp=5:5:0.6:5:5:0.0"  # a little punch and crispness
+
+
 def camera_move(idx, frames):
     """Zoom/pan settings for a still picture. Each scene gets a different move so it feels alive."""
     cx, cy = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
@@ -882,11 +903,11 @@ def build_scene(idx, kind, bg_path, audio_path, shade_png, caps, duration, out_p
 
     if kind == "video":
         chain = (f"[0:v]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
-                 f"crop={WIDTH}:{HEIGHT},setsar=1,fps={FPS}[bg]")
+                 f"crop={WIDTH}:{HEIGHT},setsar=1,fps={FPS},{GRADE}[bg]")
     else:  # a still picture: slow camera move
         frames = int(duration * FPS) + 2
         z, x, y = camera_move(idx, frames)
-        chain = (f"[0:v]zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={WIDTH}x{HEIGHT}:fps={FPS},setsar=1[bg]")
+        chain = (f"[0:v]zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={WIDTH}x{HEIGHT}:fps={FPS},setsar=1,{GRADE}[bg]")
     chain += ";[bg][1:v]overlay=0:0:format=auto[v0]"
     for i, (_, a, b) in enumerate(caps):
         chain += (f";[v{i}][{2 + i}:v]overlay=x=0:y={CAPTION_Y}:format=auto:"
@@ -1035,8 +1056,10 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
             if not visual and has_stock:
                 say(base + step // 3, f"Scene {i + 1} of {len(scenes)}: finding footage...")
                 q = scene["visual_query"]
-                queries = [x for x in dict.fromkeys([q, " ".join(q.split()[:2]), short_idea]) if x.strip()]
-                visual = find_visual(queries, used, settings, tmp, i)
+                keywords = sorted({w.strip(".,!?\"'").lower() for w in scene["narration"].split()
+                                   if len(w.strip(".,!?\"'")) > 5}, key=len, reverse=True)[:2]
+                queries = [x for x in dict.fromkeys([q, " ".join(q.split()[:2]), " ".join(keywords), short_idea]) if x.strip()]
+                visual = find_visual(queries, used, settings, tmp, i, need=duration)
             if visual and visual[0] == "image":
                 prepared = os.path.join(tmp, f"s{i}_photo.jpg")
                 prepare_photo(visual[1], prepared)
