@@ -221,7 +221,7 @@ class Handler(BaseHTTPRequestHandler):
                             "voice": s["voice"], "voices": VOICES, "ai_ready": ai.ai_ready(),
                             "visual_mode": s["visual_mode"], "ai_image_quality": s["ai_image_quality"],
                             "video_seconds": sm.clamp_seconds(s["video_seconds"]),
-                            "image_style": s["image_style"],
+                            "image_style": s["image_style"], "intro_button": s["intro_button"],
                             "image_styles": [[k, v[0]] for k, v in sm.IMAGE_STYLES.items()]})
         elif url.path == "/api/videos":
             self.send_json(list_videos())
@@ -259,6 +259,8 @@ class Handler(BaseHTTPRequestHandler):
                 remember["ai_image_quality"] = body["quality"]
             seconds = sm.clamp_seconds(body.get("seconds", 45))
             remember["video_seconds"] = seconds
+            if body.get("intro") in ("subscribe", "follow", "both"):
+                remember["intro_button"] = body["intro"]
             image_style = body.get("image_style") if body.get("image_style") in sm.IMAGE_STYLES else "auto"
             remember["image_style"] = image_style
             if remember:
@@ -486,6 +488,20 @@ PAGE = r"""<!doctype html>
           <div class="hint" id="lengthHint"></div>
         </div>
         <div class="field">
+          <label for="intro">Button at the start</label>
+          <div class="seg" data-for="intro">
+            <button type="button" data-v="subscribe">Subscribe</button>
+            <button type="button" data-v="follow">Follow</button>
+            <button type="button" data-v="both">Both</button>
+          </div>
+          <select id="intro" hidden>
+            <option value="subscribe">Subscribe</option>
+            <option value="follow">Follow</option>
+            <option value="both">Both</option>
+          </select>
+          <div class="hint">Subscribe suits YouTube, Follow suits TikTok. Both shows one after the other (the intro is a little longer).</div>
+        </div>
+        <div class="field">
           <label for="mode">Pictures</label>
           <div class="seg" data-for="mode">
             <button type="button" data-v="stock">Stock footage</button>
@@ -682,6 +698,7 @@ async function loadSettings() {
   $('voice').value = s.voice;
   $('mode').value = (!s.has_key && !s.has_pixabay_key && s.ai_ready) ? 'ai_images' : s.visual_mode;
   $('quality').value = s.ai_image_quality;
+  $('intro').value = s.intro_button || 'subscribe';
   $('length').value = s.video_seconds || 45;
   updateLength();
   const opts = '<option value="auto">Auto</option>' + (s.image_styles || []).map(x => `<option value="${x[0]}">${x[1]}</option>`).join('');
@@ -743,7 +760,7 @@ $('go').onclick = async () => {
   $('error').textContent = '';
   if (!idea) { $('error').textContent = 'Type an idea first.'; return; }
   if ($('flow').value === 'project') return draftScript(idea);
-  const res = await api('/api/generate', {idea, style: $('style').value, mode: $('mode').value, quality: $('quality').value, seconds: +$('length').value, image_style: $('imgstyle').value});
+  const res = await api('/api/generate', {idea, style: $('style').value, mode: $('mode').value, quality: $('quality').value, seconds: +$('length').value, image_style: $('imgstyle').value, intro: $('intro').value});
   if (res.error) { $('error').textContent = res.error; return; }
   setBusy(true, 'Making your video...');
   $('progress').hidden = false; $('meta').hidden = true;
@@ -900,7 +917,7 @@ async function draftScript(idea) {
 $('makeProject').onclick = async () => {
   $('error').textContent = '';
   const res = await api('/api/generate', {idea: $('idea').value.trim(), script: project, mode: $('mode').value,
-    quality: $('quality').value, seconds: +$('length').value, image_style: $('imgstyle').value});
+    quality: $('quality').value, seconds: +$('length').value, image_style: $('imgstyle').value, intro: $('intro').value});
   if (res.error) { $('error').textContent = res.error; return; }
   setBusy(true, 'Making your video...'); $('progress').hidden = false; $('meta').hidden = true;
   $('phone').textContent = 'Working on it. This takes a while.';

@@ -78,6 +78,7 @@ DEFAULT_SETTINGS = {
     "ollama_url": "http://localhost:11434",
     "voice": "en-US-GuyNeural",
     "visual_mode": "stock",          # "stock" (Pexels) or "ai_images" (made on your computer)
+    "intro_button": "subscribe",  # "subscribe", "follow" or "both"
     "ai_image_quality": "standard",  # "fast", "standard" or "high"
     "video_seconds": "45",           # how long the finished video should be (30 to 90)
     "image_style": "auto",           # a key of IMAGE_STYLES, or "auto" to let the script decide
@@ -708,23 +709,26 @@ def _star(draw, cx, cy, r, fill):
     draw.polygon(pts, fill=fill)
 
 
-def make_subscribe_cards(path_before, path_after):
+def make_subscribe_cards(path_before, path_after, kind="subscribe"):
     """Two loud, bold pictures for the opening: a big red SUBSCRIBE button with a mouse arrow, then the
     pressed SUBSCRIBED button with a ringing bell and sparkles."""
     W, H = WIDTH, 460
     bx0, by0, bx1, by1 = 110, 120, 970, 310
     bell_c = (885, (by0 + by1) // 2)
     yellow = (255, 214, 10)
+    follow = kind == "follow"
+    base_color = (254, 44, 85, 255) if follow else (238, 20, 20, 255)
+    shine_color = (255, 112, 140, 255) if follow else (255, 84, 84, 255)
     for path, done in ((path_before, False), (path_after, True)):
         img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
         # shadow, white sticker border, then the button itself
         d.rounded_rectangle((bx0 + 4, by0 + 22, bx1 + 4, by1 + 22), radius=95, fill=(0, 0, 0, 130))
         d.rounded_rectangle((bx0 - 12, by0 - 12, bx1 + 12, by1 + 12), radius=105, fill=(255, 255, 255, 255))
-        d.rounded_rectangle((bx0, by0, bx1, by1), radius=95, fill=(58, 58, 62, 255) if done else (238, 20, 20, 255))
+        d.rounded_rectangle((bx0, by0, bx1, by1), radius=95, fill=(58, 58, 62, 255) if done else base_color)
         if not done:  # shiny top half
-            d.rounded_rectangle((bx0 + 14, by0 + 10, bx1 - 14, (by0 + by1) // 2 - 4), radius=70, fill=(255, 84, 84, 255))
-        label = "SUBSCRIBED" if done else "SUBSCRIBE"
+            d.rounded_rectangle((bx0 + 14, by0 + 10, bx1 - 14, (by0 + by1) // 2 - 4), radius=70, fill=shine_color)
+        label = ("FOLLOWING" if done else "FOLLOW") if follow else ("SUBSCRIBED" if done else "SUBSCRIBE")
         tx0 = 265 if done else 150
         font = _fit_font(label, 500 if done else 600, 104)
         d.text((tx0, (by0 + by1) // 2 + 4), label, font=font, fill=(255, 255, 255), anchor="lm",
@@ -742,7 +746,13 @@ def make_subscribe_cards(path_before, path_after):
                        (bx - 62 + dx, by + 36 + dy)], fill=color)
             d.ellipse((bx - 15 + dx, by + 34 + dy, bx + 15 + dx, by + 62 + dy), fill=color)
             d.ellipse((bx - 8 + dx, by - 72 + dy, bx + 8 + dx, by - 56 + dy), fill=color)
-        _outlined(d, bell, yellow, outline=6)
+
+        def heart(dx, dy, color, bx=bx, by=by):
+            cx, cy = bx + dx, by + dy
+            d.ellipse((cx - 56, cy - 48, cx, cy + 8), fill=color)
+            d.ellipse((cx, cy - 48, cx + 56, cy + 8), fill=color)
+            d.polygon([(cx - 54, cy - 8), (cx + 54, cy - 8), (cx, cy + 56)], fill=color)
+        _outlined(d, heart if follow else bell, yellow, outline=6)
         if done:  # ring marks and sparkles
             for box, a0, a1 in (((bx - 90, by - 90, bx + 90, by + 70), 200, 245), ((bx - 90, by - 90, bx + 90, by + 70), 295, 340)):
                 d.arc(box, a0, a1, fill=yellow, width=9)
@@ -762,14 +772,14 @@ def make_subscribe_cards(path_before, path_after):
         img.save(path)
 
 
-def make_subscribe_sounds(path, duration):
+def make_subscribe_sounds(path, duration, timings=((SUBSCRIBE_START, SUBSCRIBE_CLICK, SUBSCRIBE_END),)):
     """A short pop, click and 'ding' like a video editor would add, saved as a wav file."""
     import math
     import random
     import struct
     import wave
     rate = 44100
-    n = int(rate * max(duration, SUBSCRIBE_END + 0.5))
+    n = int(rate * max(duration, max(t[2] for t in timings) + 0.5))
     buf = [0.0] * n
     rnd = random.Random(7)
 
@@ -779,12 +789,13 @@ def make_subscribe_sounds(path, duration):
             if i0 + i < n:
                 buf[i0 + i] += fn(i / rate)
 
-    add(SUBSCRIBE_START, 0.14, lambda t: 0.5 * math.sin(2 * math.pi * (350 + 3500 * t) * t) * math.exp(-t * 14))  # pop
-    add(SUBSCRIBE_CLICK, 0.07, lambda t: 0.5 * (rnd.random() * 2 - 1) * math.exp(-t * 70)
-        + 0.4 * math.sin(2 * math.pi * 160 * t) * math.exp(-t * 40))  # click
-    add(SUBSCRIBE_CLICK + 0.06, 0.8, lambda t: 0.3 * (math.sin(2 * math.pi * 1318.5 * t) + 0.6 * math.sin(2 * math.pi * 1975.5 * t))
-        * math.exp(-t * 6))  # ding
-    add(SUBSCRIBE_END - 0.25, 0.25, lambda t: 0.25 * (rnd.random() * 2 - 1) * (t / 0.25) * math.exp(-((t - 0.25) * 6) ** 2 if t > 0.25 else 0))  # whoosh
+    for t_start, t_click, t_end in timings:
+        add(t_start, 0.14, lambda t: 0.5 * math.sin(2 * math.pi * (350 + 3500 * t) * t) * math.exp(-t * 14))  # pop
+        add(t_click, 0.07, lambda t: 0.5 * (rnd.random() * 2 - 1) * math.exp(-t * 70)
+            + 0.4 * math.sin(2 * math.pi * 160 * t) * math.exp(-t * 40))  # click
+        add(t_click + 0.06, 0.8, lambda t: 0.3 * (math.sin(2 * math.pi * 1318.5 * t) + 0.6 * math.sin(2 * math.pi * 1975.5 * t))
+            * math.exp(-t * 6))  # ding
+        add(t_end - 0.25, 0.25, lambda t: 0.25 * (rnd.random() * 2 - 1) * (t / 0.25) * math.exp(-((t - 0.25) * 6) ** 2 if t > 0.25 else 0))  # whoosh
     with wave.open(path, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
@@ -890,16 +901,18 @@ def camera_move(idx, frames):
 
 
 def build_scene(idx, kind, bg_path, audio_path, shade_png, caps, duration, out_path, subscribe=None):
-    """caps: list of (png_path, start, end). subscribe: optional (before_png, after_png) shown at the start.
+    """caps: list of (png_path, start, end). subscribe: optional dict {"badges": [{cards, start, click, end}], "sfx": wav}.
     Builds one finished scene clip."""
     inputs = (["-stream_loop", "-1"] if kind == "video" else []) + ["-i", bg_path, "-i", shade_png]
     for png, _, _ in caps:
         inputs += ["-i", png]
     inputs += ["-i", audio_path]
     audio_idx = 2 + len(caps)
-    if subscribe:  # (before picture, after picture, sound effects file)
-        inputs += ["-loop", "1", "-t", f"{duration:.3f}", "-i", subscribe[0],
-                   "-loop", "1", "-t", f"{duration:.3f}", "-i", subscribe[1], "-i", subscribe[2]]
+    if subscribe:
+        for bd in subscribe["badges"]:
+            inputs += ["-loop", "1", "-t", f"{duration:.3f}", "-i", bd["cards"][0],
+                       "-loop", "1", "-t", f"{duration:.3f}", "-i", bd["cards"][1]]
+        inputs += ["-i", subscribe["sfx"]]
 
     if kind == "video":
         chain = (f"[0:v]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
@@ -916,21 +929,28 @@ def build_scene(idx, kind, bg_path, audio_path, shade_png, caps, duration, out_p
     last = f"v{len(caps)}"
     audio_chain = f"[{audio_idx}:a]apad[aout]"
     if subscribe:
-        start = SUBSCRIBE_START
-        end = min(SUBSCRIBE_END, max(duration - 0.1, SUBSCRIBE_CLICK + 0.4))
-        click = min(SUBSCRIBE_CLICK, end - 0.4)
-        pa, pb, sfx = audio_idx + 1, audio_idx + 2, audio_idx + 3
-        p_in = f"clip((t-{start})/0.35,0,1)"
-        pop = f"(1+2.70158*pow({p_in}-1,3)+1.70158*pow({p_in}-1,2))"  # grows in with a bounce
-        punch = f"(1+0.20*sin(PI*clip((t-{click:.3f})/0.30,0,1)))"      # a quick punch when it is clicked
-        leave = f"(1-pow(clip((t-{end - 0.25:.3f})/0.25,0,1),2))"          # shrinks away
         size = lambda e: f"w='max(2,trunc(iw*({e})/2)*2)':h='max(2,trunc(ih*({e})/2)*2)':eval=frame"
         place = f"x='(W-w)/2':y='{SUBSCRIBE_CENTER_Y}-h/2':format=auto"
-        chain += (f";[{pa}:v]format=rgba,scale={size(pop)}[sa]"
-                  f";[{pb}:v]format=rgba,scale={size(punch + '*' + leave)}[sb]"
-                  f";[{last}][sa]overlay={place}:enable='between(t,{start},{click:.3f})'[vs1]"
-                  f";[vs1][sb]overlay={place}:enable='between(t,{click:.3f},{end - 0.01:.3f})'[vs2]")
-        last = "vs2"
+        nb, k = len(subscribe["badges"]), audio_idx + 1
+        for n, bd in enumerate(subscribe["badges"]):
+            start, click, end = bd["times"]
+            if start > duration - 0.9:   # the scene is too short for this one
+                k += 2
+                continue
+            end = min(end, max(duration - 0.1, click + 0.4))
+            click = min(click, end - 0.4)
+            pa, pb = k, k + 1
+            k += 2
+            p_in = f"clip((t-{start:.3f})/0.35,0,1)"
+            pop = f"(1+2.70158*pow({p_in}-1,3)+1.70158*pow({p_in}-1,2))"  # grows in with a bounce
+            punch = f"(1+0.20*sin(PI*clip((t-{click:.3f})/0.30,0,1)))"      # a quick punch when it is clicked
+            leave = f"(1-pow(clip((t-{end - 0.25:.3f})/0.25,0,1),2))"          # shrinks away
+            chain += (f";[{pa}:v]format=rgba,scale={size(pop)}[sa{n}]"
+                      f";[{pb}:v]format=rgba,scale={size(punch + '*' + leave)}[sb{n}]"
+                      f";[{last}][sa{n}]overlay={place}:enable='between(t,{start:.3f},{click:.3f})'[vs{n}a]"
+                      f";[vs{n}a][sb{n}]overlay={place}:enable='between(t,{click:.3f},{end - 0.01:.3f})'[vs{n}b]")
+            last = f"vs{n}b"
+        sfx = k
         audio_chain = f"[{audio_idx}:a]apad[a0];[a0][{sfx}:a]amix=inputs=2:duration=first:dropout_transition=0,volume=1.7[aout]"
     chain += ";" + audio_chain
     run_ffmpeg([FFMPEG, "-y", *inputs, "-filter_complex", chain,
@@ -1034,9 +1054,18 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
         shade = os.path.join(tmp, "shade.png")
         make_shade(shade)
         used, clips, warnings = set(), [], []
-        subscribe_cards = (os.path.join(tmp, "sub1.png"), os.path.join(tmp, "sub2.png"), os.path.join(tmp, "sub.wav"))
-        make_subscribe_cards(subscribe_cards[0], subscribe_cards[1])
-        make_subscribe_sounds(subscribe_cards[2], 4.0)
+        which = settings.get("intro_button") if settings.get("intro_button") in ("subscribe", "follow", "both") else "subscribe"
+        kinds = ["subscribe", "follow"] if which == "both" else [which]
+        gap, length, click_at = (2.2, 2.2, 1.1) if len(kinds) > 1 else (0, 2.8, 1.4)
+        badges = []
+        for n, kd in enumerate(kinds):
+            cards = (os.path.join(tmp, f"{kd}1.png"), os.path.join(tmp, f"{kd}2.png"))
+            make_subscribe_cards(cards[0], cards[1], kd)
+            start = SUBSCRIBE_START + n * length
+            badges.append({"cards": cards, "times": (start, start + click_at, start + length)})
+        sfx_path = os.path.join(tmp, "sub.wav")
+        make_subscribe_sounds(sfx_path, 6.0, [b["times"] for b in badges])
+        subscribe_cards = {"badges": badges, "sfx": sfx_path}
         short_idea = " ".join((idea or script["title"]).replace("#shorts", "").split()[:4])
 
         for i, scene in enumerate(scenes):
@@ -1079,7 +1108,10 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
                     render_caption([words[j] for j in chunk], chunk.index(wi), png)
                     caps.append((png, *windows[wi]))
             clip = os.path.join(tmp, f"scene{i}.mp4")
-            build_scene(i, visual[0], visual[1], audio, shade, caps, duration, clip,
+            scene_len = duration
+            if i == 0:  # a short opening line is stretched a little so every intro button gets its full moment
+                scene_len = max(duration, max(b["times"][2] for b in badges) + 0.2)
+            build_scene(i, visual[0], visual[1], audio, shade, caps, scene_len, clip,
                         subscribe=subscribe_cards if i == 0 else None)
             clips.append(clip)
             mark(i + 1, "done")
