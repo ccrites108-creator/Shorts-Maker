@@ -76,10 +76,16 @@ def run_job(job_id, idea, style, mode, seconds=None, script=None, image_style=No
             "description": result["description"], "script": result["script"],
             "warnings": result.get("warnings", [])})
     except sm.PipelineError as err:
-        job.update(state="error", message=str(err))
+        job.update(state="error", message=str(err) + saved_note())
     except Exception as err:  # something unexpected: show it, and print details in the console
         traceback.print_exc()
-        job.update(state="error", message=f"Something unexpected went wrong: {err}")
+        job.update(state="error", message=f"Something unexpected went wrong: {err}" + saved_note())
+
+
+def saved_note():
+    """After a failed video: tell the person their finished scenes are kept."""
+    return ("\n\nYour progress is saved. Click Continue under the button (or Make my video again with the same "
+            "settings) and it picks up where it stopped.") if sm.list_unfinished() else ""
 
 
 def run_draft(job_id, idea, style, seconds):
@@ -223,6 +229,8 @@ class Handler(BaseHTTPRequestHandler):
                             "video_seconds": sm.clamp_seconds(s["video_seconds"]),
                             "image_style": s["image_style"], "intro_button": s["intro_button"],
                             "image_styles": [[k, v[0]] for k, v in sm.IMAGE_STYLES.items()]})
+        elif url.path == "/api/unfinished":
+            self.send_json({"items": sm.list_unfinished()[:3]})
         elif url.path == "/api/videos":
             self.send_json(list_videos())
         elif url.path.startswith("/video/"):
@@ -268,6 +276,24 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=run_job, args=(job_id, idea, str(body.get("style", "")).strip(), mode, seconds, script,
                                    None if image_style == "auto" else image_style),
                              daemon=True).start()
+            self.send_json({"id": job_id})
+        elif url.path == "/api/discard":
+            sm.discard_unfinished(str(body.get("key", "")))
+            self.send_json({"ok": True})
+        elif url.path == "/api/resume":
+            st = sm.get_unfinished(str(body.get("key", "")))
+            if not st:
+                return self.send_json({"error": "That unfinished video is no longer available."}, 404)
+            if st.get("mode_arg") == "ai_images" and not ai.ai_ready():
+                return self.send_json({"error": "AI images aren't set up on this computer."}, 400)
+            with LOCK:
+                if any(j["state"] == "running" for j in JOBS.values()):
+                    return self.send_json({"error": "Something is already running. Please wait for it to finish."}, 409)
+                job_id = uuid.uuid4().hex[:8]
+                JOBS[job_id] = {"state": "running", "kind": "video", "pct": 1, "message": "Picking up where it left off..."}
+            threading.Thread(target=run_job, args=(job_id, st.get("idea", ""), st.get("style", ""), st.get("mode_arg"),
+                                                   st.get("seconds"), st["script"] if st.get("from_project") else None,
+                                                   st.get("image_arg")), daemon=True).start()
             self.send_json({"id": job_id})
         elif url.path in ("/api/draft", "/api/hooks"):
             idea = str(body.get("idea", "")).strip()
@@ -546,6 +572,7 @@ PAGE = r"""<!doctype html>
           <div class="hint" id="flowHint"></div>
         </div>
         <button id="go" class="primary">Make my video</button>
+        <div id="resumeBox" class="notice" hidden></div>
         <div id="progress" hidden>
           <ul class="steps" id="steps"></ul>
           <div class="bar"><i id="fill"></i></div>
@@ -810,7 +837,35 @@ async function poll(id) {
   }
 }
 
+async function loadUnfinished() {
+  let items = [];
+  try { items = (await api('/api/unfinished')).items || []; } catch (e) {}
+  const box = $('resumeBox');
+  box.hidden = !items.length;
+  box.innerHTML = '';
+  items.forEach(it => {
+    const row = el('div', {style: 'margin:4px 0'},
+      el('b', {}, (it.idea || 'Unfinished video').slice(0, 60)), ' - ' + it.done + ' of ' + it.total + ' scenes finished  ',
+      el('button', {class: 'ghost', onclick: () => resumeVideo(it.key)}, 'Continue'), ' ',
+      el('button', {class: 'ghost', onclick: async () => { await api('/api/discard', {key: it.key}); loadUnfinished(); }}, 'Discard'));
+    box.append(row);
+  });
+}
+
+async function resumeVideo(key) {
+  $('error').textContent = '';
+  const res = await api('/api/resume', {key});
+  if (res.error) { $('error').textContent = res.error; return; }
+  setBusy(true, 'Making your video...');
+  $('progress').hidden = false; $('meta').hidden = true;
+  renderSteps([{label: 'Picking up where it left off', state: 'active'}]);
+  $('phone').textContent = 'Working on it. This takes a while.';
+  clearInterval(timer);
+  timer = setInterval(() => poll(res.id), 1500);
+}
+
 function finish() {
+  loadUnfinished();
   setBusy(false, goLabel());
   $('setupBtn').disabled = false;
   $('progress').hidden = true;
@@ -944,7 +999,7 @@ $('reveal').onclick = async () => {
 $('copyTitle').onclick = () => navigator.clipboard.writeText(current.title);
 $('copyDesc').onclick = () => navigator.clipboard.writeText(current.desc);
 
-loadSettings(); loadVideos();
+loadSettings(); loadVideos(); loadUnfinished();
 </script>
 </body>
 </html>

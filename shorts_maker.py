@@ -20,10 +20,13 @@ License: MIT (see LICENSE)
 
 import argparse
 import asyncio
+import contextlib
 import functools
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -999,6 +1002,58 @@ def draft_script(idea, style="", engine="ollama", progress=None, seconds=None):
     return generate_script(idea, style, engine, settings, say, seconds)
 
 
+# --------------------------------------------------------------------------- unfinished videos (resume)
+
+WORK_ROOT = os.path.join(SETTINGS_DIR, "work")   # one folder per video being made; deleted when the video is done
+WORK_KEEP_DAYS = 7
+
+
+def _write_json(path, data):
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp_path, path)
+
+
+def _read_json(path, default=None):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def list_unfinished():
+    """Videos that stopped half way, newest first, so the page can offer to continue them."""
+    found = []
+    try:
+        names = os.listdir(WORK_ROOT)
+    except OSError:
+        return found
+    for key in names:
+        folder = os.path.join(WORK_ROOT, key)
+        st = _read_json(os.path.join(folder, "state.json"))
+        if not st or not st.get("script"):
+            continue
+        if time.time() - st.get("updated", 0) > WORK_KEEP_DAYS * 86400:
+            shutil.rmtree(folder, ignore_errors=True)
+            continue
+        found.append({"key": key, "idea": st.get("idea") or st["script"].get("title", ""), "done": len(st.get("done", [])),
+                      "total": len(st["script"].get("scenes", [])), "updated": st.get("updated", 0)})
+    return sorted(found, key=lambda x: -x["updated"])
+
+
+def get_unfinished(key):
+    if not re.fullmatch(r"[0-9a-f]{12}", key or ""):
+        return None
+    return _read_json(os.path.join(WORK_ROOT, key, "state.json"))
+
+
+def discard_unfinished(key):
+    if re.fullmatch(r"[0-9a-f]{12}", key or ""):
+        shutil.rmtree(os.path.join(WORK_ROOT, key), ignore_errors=True)
+
+
 def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_audio=False,
                visual_mode=None, steps=None, seconds=None, script=None, image_style=None):
     """The whole pipeline. Returns a dict with the video path, title, description and script.
@@ -1021,18 +1076,37 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
         raise PipelineError("AI images aren't set up yet. Click \"Set up AI images\" on the page "
                             "(a one-time download), or switch Visuals to Stock footage.")
 
-    if script is None:
-        say(2, "Writing the script..." if not demo else "Using the built-in sample script...")
-    seconds = clamp_seconds(seconds if seconds is not None else settings["video_seconds"])
-    if script is not None:  # a project the person edited on the page
+    from_project = script is not None
+    if from_project:  # a project the person edited on the page
         try:
             script = clean_script(script)
         except ValueError as err:
             raise PipelineError(f"That project can't be used ({err}).")
-    else:
-        script = DEMO_SCRIPT if demo else generate_script(idea, style, engine, settings, say, seconds)
-    scenes = script["scenes"]
     chosen = image_style or settings["image_style"]
+    seconds = clamp_seconds(seconds if seconds is not None else settings["video_seconds"])
+    key = hashlib.sha1(json.dumps({
+        "idea": idea, "style": style, "seconds": seconds, "mode": mode, "image": chosen, "demo": demo,
+        "intro": settings.get("intro_button"), "quality": settings["ai_image_quality"], "voice": settings["voice"],
+        "script": script if from_project else None}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:12]
+    work = os.path.join(WORK_ROOT, key)
+    os.makedirs(work, exist_ok=True)
+    state = _read_json(os.path.join(work, "state.json"), {}) or {}
+    saved = state.get("script")
+    if saved and not from_project:
+        try:
+            script = clean_script(saved)   # the same video was started before: carry on with its script
+            say(2, f"Picking up where it left off ({len(state.get('done', []))} scene(s) already finished)...")
+        except ValueError:
+            saved = None
+    if not saved or from_project:
+        if not from_project:
+            say(2, "Writing the script..." if not demo else "Using the built-in sample script...")
+            script = DEMO_SCRIPT if demo else generate_script(idea, style, engine, settings, say, seconds)
+        state = {"idea": idea, "style": style, "mode_arg": visual_mode, "seconds": seconds, "image_arg": image_style,
+                 "from_project": from_project, "script": script, "done": [], "used": []} if not saved else state
+    state["updated"] = time.time()
+    _write_json(os.path.join(work, "state.json"), state)
+    scenes = script["scenes"]
     look = IMAGE_STYLES[chosen][1] if chosen in IMAGE_STYLES else (script.get("visual_style") or DEFAULT_LOOK)
     has_stock = bool(settings["pexels_key"] or settings["pixabay_key"])
     if mode == "stock" and not has_stock and ai_images.ai_ready():
@@ -1050,10 +1124,11 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
     plan.append({"label": "Put the video together", "state": "pending"})
     mark(0, "done")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    with tempfile.TemporaryDirectory() as tmp:
+    with contextlib.nullcontext(work) as tmp:
         shade = os.path.join(tmp, "shade.png")
         make_shade(shade)
-        used, clips, warnings = set(), [], []
+        used, clips, warnings = {tuple(u) for u in state.get("used", [])}, [], []
+        done_scenes = set(state.get("done", []))
         which = settings.get("intro_button") if settings.get("intro_button") in ("subscribe", "follow", "both") else "subscribe"
         kinds = ["subscribe", "follow"] if which == "both" else [which]
         gap, length, click_at = (2.2, 2.2, 1.1) if len(kinds) > 1 else (0, 2.8, 1.4)
@@ -1072,9 +1147,19 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
             base = 10 + int(80 * i / len(scenes))
             step = 80 // len(scenes)
             mark(i + 1, "active")
+            clip = os.path.join(tmp, f"scene{i}.mp4")
+            if i in done_scenes and os.path.exists(clip) and os.path.getsize(clip) > 10_000:
+                say(base, f"Scene {i + 1} of {len(scenes)}: already finished earlier, reusing it.")
+                clips.append(clip)
+                mark(i + 1, "done")
+                continue
             say(base, f"Scene {i + 1} of {len(scenes)}: recording the voice...")
             audio = os.path.join(tmp, f"s{i}.mp3")
-            marks = make_voice(scene["narration"], settings["voice"], audio, fake=fake_audio)
+            marks_file = os.path.join(tmp, f"marks{i}.json")
+            marks = _read_json(marks_file) if os.path.exists(audio) else None
+            if marks is None:
+                marks = make_voice(scene["narration"], settings["voice"], audio, fake=fake_audio)
+                _write_json(marks_file, marks)
             duration = audio_seconds(audio) + 0.25
 
             visual = None
@@ -1107,13 +1192,15 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
                     png = os.path.join(tmp, f"c{i}_{wi}.png")
                     render_caption([words[j] for j in chunk], chunk.index(wi), png)
                     caps.append((png, *windows[wi]))
-            clip = os.path.join(tmp, f"scene{i}.mp4")
             scene_len = duration
             if i == 0:  # a short opening line is stretched a little so every intro button gets its full moment
                 scene_len = max(duration, max(b["times"][2] for b in badges) + 0.2)
             build_scene(i, visual[0], visual[1], audio, shade, caps, scene_len, clip,
                         subscribe=subscribe_cards if i == 0 else None)
             clips.append(clip)
+            done_scenes.add(i)
+            state.update(done=sorted(done_scenes), used=[list(u) for u in used], updated=time.time())
+            _write_json(os.path.join(work, "state.json"), state)   # saved, so a failure later can carry on from here
             mark(i + 1, "done")
 
         mark(len(plan) - 1, "active")
@@ -1128,6 +1215,7 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
         run_ffmpeg([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", listfile, "-c", "copy",
                     "-movflags", "+faststart", out_path], "joining scenes")
 
+    shutil.rmtree(work, ignore_errors=True)   # finished: nothing left to resume
     mark(len(plan) - 1, "done")
     with open(os.path.join(OUTPUT_DIR, name + ".txt"), "w", encoding="utf-8") as f:
         f.write(script["title"] + "\n\n" + script["description"] + "\n\n--- script (check the facts!) ---\n")
