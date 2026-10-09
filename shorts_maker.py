@@ -45,6 +45,9 @@ from PIL import Image, ImageDraw, ImageFont
 import imageio_ffmpeg
 
 import ai_images
+import story as storylib
+
+__version__ = "2.0.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(HERE, "output")
@@ -81,6 +84,9 @@ DEFAULT_SETTINGS = {
     "ollama_url": "http://localhost:11434",
     "voice": "en-US-GuyNeural",
     "visual_mode": "stock",          # "stock" (Pexels) or "ai_images" (made on your computer)
+    "story_format": "explainer",
+    "story_tone": "documentary",
+    "story_ending": "follow",
     "intro_button": "subscribe",  # "subscribe", "follow" or "both"
     "ai_image_quality": "standard",  # "fast", "standard" or "high"
     "video_seconds": "45",           # how long the finished video should be (30 to 90)
@@ -192,14 +198,15 @@ DEMO_SCRIPT = {
 PROMPT = """You write scripts for YouTube Shorts (vertical videos, about {seconds} seconds long).
 
 Idea: {topic}
-{style}
+{style}{story}
 Return ONLY valid JSON with this exact shape:
 {{
   "title": "catchy title under 70 characters, ending with #shorts",
   "description": "1-2 sentences plus 3-5 hashtags",
   "visual_style": "a short phrase giving every picture the same look, e.g. 'cinematic photography, moody lighting' or 'bold flat illustration, bright colors'",
   "scenes": [
-    {{"narration": "what the voice says (1-2 short sentences)",
+    {{"beat": "the story beat this scene belongs to (a short label)",
+      "narration": "what the voice says (1-2 short sentences)",
       "visual_query": "2-4 English words describing something concrete a camera could film",
       "image_prompt": "one detailed sentence describing the picture for this scene: the subject, the setting, the lighting and the mood"}}
   ]
@@ -207,7 +214,7 @@ Return ONLY valid JSON with this exact shape:
 
 Rules:
 - {scenes_lo} to {scenes_hi} scenes. Scene 1 must be a strong hook that grabs attention in the first 3 seconds.
-- The last scene invites viewers to follow or comment.
+- {ending}
 - Conversational, accurate, no filler. Total narration must be {words_lo} to {words_hi} words (about {seconds} seconds when spoken).
 - visual_query must be a concrete, filmable thing like "octopus swimming underwater",
   "city traffic at night" or "hands typing laptop". Never an abstract idea like "curiosity" or "success".
@@ -275,6 +282,7 @@ def clean_script(data):
         if narration:
             style_key = s.get("style") if s.get("style") in IMAGE_STYLES else ""
             scenes.append({"narration": narration,
+                           "beat": " ".join(str(s.get("beat") or "").split())[:30],
                            "visual_query": str(s.get("visual_query") or s.get("visual") or "").strip(),
                            "image_prompt": str(s.get("image_prompt") or "").strip(),
                            "style": style_key, "fresh": bool(s.get("fresh"))})
@@ -331,6 +339,104 @@ def suggest_hooks(topic, script, settings, engine="ollama"):
         except (ValueError, KeyError, TypeError, AttributeError) as err:
             last = str(err)
     raise PipelineError(f"The AI model couldn't come up with hooks ({last}). Try again.")
+
+
+SERIES_PROMPT = """You plan multi-part YouTube Shorts series where each short is one chapter of a bigger story.
+
+Series topic: {topic}
+Number of parts: {parts}
+Story format for each part: {fmt}
+{bible}
+Return ONLY valid JSON with this exact shape:
+{{
+  "title": "series title, under 50 characters, no hashtags",
+  "parts": [
+    {{"title": "short title for this part",
+      "idea": "one or two specific sentences saying exactly what this part covers",
+      "teaser": "one sentence that ends the part on a hook for the next part"}}
+  ]
+}}
+
+Rules:
+- Exactly {parts} parts. Each part builds on the one before it and works as a video on its own.
+- Part 1 hooks the viewer and sets up the big question. The last part pays it off.
+- Be concrete: real names, places, numbers and events, never vague filler.
+- Do not put hashtags or the words "part 1" in the titles."""
+
+
+def plan_series(topic, parts, fmt, tone, settings, bible="", engine="ollama"):
+    """Ask the model to outline a multi-part series. Falls back to editable placeholders if it can't."""
+    ask = ask_ollama if engine == "ollama" else ask_claude
+    parts = max(2, min(8, int(parts)))
+    fmt = fmt if fmt in storylib.STORY_FORMATS else storylib.DEFAULT_FORMAT
+    prompt = SERIES_PROMPT.format(topic=topic, parts=parts, fmt=storylib.STORY_FORMATS[fmt]["name"],
+                                  bible=f"Recurring world and look: {bible}\n" if bible else "")
+    last = "no reply"
+    for _ in range(3):
+        try:
+            data = _first_json(re.sub(r"```(?:json)?", "", ask(prompt, settings)))
+            if not isinstance(data.get("parts"), list):  # a different key name for the list
+                data["parts"] = next((v for v in data.values() if isinstance(v, list)), None)
+            data.update(topic=topic, format=fmt, tone=tone, bible=bible)
+            series = storylib.clean_series(data)
+            if len(series["parts"]) >= 2:
+                series["parts"] = series["parts"][:parts]
+                return series
+        except (ValueError, KeyError, TypeError, AttributeError) as err:
+            last = str(err)
+    fallback = storylib.fallback_series(topic, parts, fmt, tone)
+    fallback["bible"] = bible
+    fallback["note"] = f"The AI model couldn't plan this series ({last}), so these are plain placeholders. Edit them or try again."
+    return fallback
+
+
+REWRITE_PROMPT = """You are editing ONE scene of a YouTube Short script. Rewrite only that scene.
+
+Video title: {title}
+Full script, one numbered line per scene:
+{lines}
+
+Scene to rewrite: number {number}
+Instruction: {instruction}
+{story}
+Return ONLY valid JSON: {{"narration": "...", "visual_query": "2-4 English words a camera could film", "image_prompt": "one detailed sentence describing the picture"}}
+
+Rules:
+- Keep the new narration about the same length as the old one unless the instruction says otherwise.
+- It must still fit between the scene before it and the scene after it.
+- Keep it accurate. Never invent facts.
+- image_prompt must show something concrete and visible, with no words, letters or logos."""
+
+
+def rewrite_scene(script, index, instruction, settings, story=None, engine="ollama"):
+    """Rewrite one scene by an instruction like 'more dramatic'. Returns the new scene dict."""
+    ask = ask_ollama if engine == "ollama" else ask_claude
+    script = clean_script(script)
+    scenes = script["scenes"]
+    if not 0 <= index < len(scenes):
+        raise PipelineError("That scene doesn't exist.")
+    old = scenes[index]
+    lines = "\n".join(f"{n}. {sc['narration']}" for n, sc in enumerate(scenes, 1))
+    prompt = REWRITE_PROMPT.format(title=script["title"], lines=lines, number=index + 1,
+                                   instruction=(instruction or "Make it better.").strip()[:300],
+                                   story=storylib.story_block(story))
+    last = "no reply"
+    for _ in range(3):
+        try:
+            data = _first_json(re.sub(r"```(?:json)?", "", ask(prompt, settings)))
+            narration = str(data.get("narration") or data.get("text") or "").strip()
+            if not narration:
+                raise ValueError("no narration in the reply")
+            new = dict(old, narration=narration)
+            if data.get("visual_query"):
+                new["visual_query"] = str(data["visual_query"]).strip()
+            if data.get("image_prompt"):
+                new["image_prompt"] = str(data["image_prompt"]).strip()
+                new["fresh"] = True   # the picture changed, so paint it again
+            return sanitize_scenes({"scenes": [new]}, script["title"])["scenes"][0]
+        except (ValueError, KeyError, TypeError, AttributeError) as err:
+            last = str(err)
+    raise PipelineError(f"The AI model couldn't rewrite that scene ({last}). Try again.")
 
 
 def script_from_prose(text, topic):
@@ -405,14 +511,26 @@ def sanitize_scenes(script, topic):
     for k, sc in enumerate(scenes):
         if CTA_WORDS.search(sc.get("image_prompt", "") + " " + sc.get("visual_query", "")):
             sc["visual_query"] = base_q if k else (topic[:60] or base_q)
-            sc["image_prompt"] = f"Wide cinematic establishing shot related to: {base_p}" if k else base_p
+            sc["image_prompt"] = (f"Wide cinematic establishing shot related to: {base_p}" if k
+                                  else f"A striking, detailed scene about {topic}")
     return script
 
 
-def generate_script(topic, style, engine, settings, progress, seconds=45):
+def apply_story(script, story):
+    """Small fixes after the model has written: a series part gets its part number in the title and description."""
+    if story and story.get("part"):
+        tag = f"Part {story['part']}/{story['parts']}"
+        name = story.get("series_title") or script["title"].replace("#shorts", "").strip()
+        script["title"] = f"{name} - {tag} #shorts"[:100]
+        script["description"] = f"{tag} of {name}. " + script["description"]
+    return script
+
+
+def generate_script(topic, style, engine, settings, progress, seconds=45, story=None):
     ask = ask_ollama if engine == "ollama" else ask_claude
     plan = length_plan(seconds)
-    base = PROMPT.format(topic=topic, style=f"Style / niche notes: {style}\n" if style else "", **plan)
+    base = PROMPT.format(topic=topic, style=f"Style / niche notes: {style}\n" if style else "",
+                         story=storylib.story_block(story), ending=storylib.ending_rule(story), **plan)
     prompt, last_reply, last_err = base, "", "no reply"
     for attempt in range(1, 6):  # small models sometimes slip; try up to 5 times
         try:
@@ -421,7 +539,7 @@ def generate_script(topic, style, engine, settings, progress, seconds=45):
             spoken = sum(len(sc["narration"].split()) for sc in script["scenes"])
             if spoken < plan["words"] * 0.65 and attempt < 3:  # small models tend to write too little for long videos
                 raise ValueError(f"too short: {spoken} words, need about {plan['words']}")
-            return sanitize_scenes(script, topic)
+            return apply_story(sanitize_scenes(script, topic), story)
         except (ValueError, KeyError, TypeError, AttributeError) as err:
             last_err = str(err)
             progress(None, f"The model's answer wasn't usable ({err}); trying again ({attempt}/5)...")
@@ -629,14 +747,22 @@ def prepare_photo(src, dst, size=(1620, 2880)):
     img.crop((left, top, left + tw, top + th)).save(dst, quality=92)
 
 
-def make_shade(path):
-    """A soft dark layer so white text stays readable on any footage."""
+def make_shade(path, part=None):
+    """A soft dark layer so white text stays readable on any footage. part=(n, total) adds a small PART n/total tag."""
     img = Image.new("RGBA", (WIDTH, HEIGHT))
     d = ImageDraw.Draw(img)
     center = CAPTION_Y + CAPTION_H / 2
     for y in range(HEIGHT):
         alpha = 25 + max(0, 1 - y / 450) * 90 + max(0, 1 - abs(y - center) / 520) * 110
         d.line([(0, y), (WIDTH, y)], fill=(0, 0, 0, int(min(alpha, 200))))
+    if part:
+        text = f"PART {part[0]}/{part[1]}"
+        font = load_font(46)
+        w = d.textlength(text, font=font)
+        cx, cy, pad = WIDTH // 2, 215, 34
+        d.rounded_rectangle((cx - w / 2 - pad, cy - 42, cx + w / 2 + pad, cy + 42), radius=42,
+                            fill=(255, 255, 255, 235))
+        d.text((cx, cy + 2), text, font=font, fill=(20, 20, 30), anchor="mm")
     img.save(path)
 
 
@@ -808,10 +934,10 @@ def make_subscribe_sounds(path, duration, timings=((SUBSCRIBE_START, SUBSCRIBE_C
 
 # --------------------------------------------------------------------------- voice + timing
 
-async def synth(text, voice, path):
+async def synth(text, voice, path, rate="+0%"):
     import edge_tts
     try:
-        comm = edge_tts.Communicate(text, voice, boundary="WordBoundary")
+        comm = edge_tts.Communicate(text, voice, rate=rate, boundary="WordBoundary")
     except TypeError:  # older versions of the library
         comm = edge_tts.Communicate(text, voice)
     marks = []
@@ -824,7 +950,7 @@ async def synth(text, voice, path):
     return marks
 
 
-def make_voice(text, voice, path, fake=False):
+def make_voice(text, voice, path, fake=False, rate="+0%"):
     """Returns (word start times if known else [])."""
     if fake:  # testing only: a beep as long as the sentence would take to say
         secs = max(1.5, len(text.split()) * 0.35)
@@ -832,7 +958,7 @@ def make_voice(text, voice, path, fake=False):
                     "-q:a", "6", path], "test audio")
         return []
     try:
-        return asyncio.run(synth(text, voice, path))
+        return asyncio.run(synth(text, voice, path, rate))
     except ImportError:
         raise PipelineError("The voice add-on isn't installed. Run: pip install -r requirements.txt")
     except Exception as err:
@@ -967,10 +1093,10 @@ def slugify(text):
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:50] or "video"
 
 
-def ai_visual(i, n, scene, look, quality, tmp, say, pct, warnings, can_fall_back):
+def ai_visual(i, n, scene, look, quality, tmp, say, pct, warnings, can_fall_back, bible=""):
     """Paint an AI picture for one scene on this computer. Returns ('image', path) or None."""
     subject = scene.get("image_prompt") or scene.get("visual_query") or scene["narration"]
-    prompt = (f"{subject}. {look}. Vertical composition. "
+    prompt = (f"{subject}. {bible + '. ' if bible else ''}{look}. Vertical composition. "
               "No text, no letters, no words, no logos, no interface elements.")
     path = os.path.join(tmp, f"s{i}_ai.png")
     label = f"Scene {i + 1} of {n}: painting the AI picture"
@@ -993,13 +1119,13 @@ def ai_visual(i, n, scene, look, quality, tmp, say, pct, warnings, can_fall_back
     return "image", path
 
 
-def draft_script(idea, style="", engine="ollama", progress=None, seconds=None):
+def draft_script(idea, style="", engine="ollama", progress=None, seconds=None, story=None):
     """Write just the script (no video), so it can be edited on the page first."""
     settings = load_settings()
     seconds = clamp_seconds(seconds if seconds is not None else settings["video_seconds"])
     say = progress or (lambda p, m: None)
     say(5, "Writing the script...")
-    return generate_script(idea, style, engine, settings, say, seconds)
+    return generate_script(idea, style, engine, settings, say, seconds, story)
 
 
 # --------------------------------------------------------------------------- unfinished videos (resume)
@@ -1055,7 +1181,7 @@ def discard_unfinished(key):
 
 
 def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_audio=False,
-               visual_mode=None, steps=None, seconds=None, script=None, image_style=None):
+               visual_mode=None, steps=None, seconds=None, script=None, image_style=None, story=None):
     """The whole pipeline. Returns a dict with the video path, title, description and script.
     steps(list) is called with a checklist like [{"label": ..., "state": "pending|active|done"}]."""
     plan = [{"label": "Write the script", "state": "active"}]
@@ -1086,7 +1212,7 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
     seconds = clamp_seconds(seconds if seconds is not None else settings["video_seconds"])
     key = hashlib.sha1(json.dumps({
         "idea": idea, "style": style, "seconds": seconds, "mode": mode, "image": chosen, "demo": demo,
-        "intro": settings.get("intro_button"), "quality": settings["ai_image_quality"], "voice": settings["voice"],
+        "story": story, "intro": settings.get("intro_button"), "quality": settings["ai_image_quality"], "voice": settings["voice"],
         "script": script if from_project else None}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:12]
     work = os.path.join(WORK_ROOT, key)
     os.makedirs(work, exist_ok=True)
@@ -1101,8 +1227,9 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
     if not saved or from_project:
         if not from_project:
             say(2, "Writing the script..." if not demo else "Using the built-in sample script...")
-            script = DEMO_SCRIPT if demo else generate_script(idea, style, engine, settings, say, seconds)
+            script = DEMO_SCRIPT if demo else generate_script(idea, style, engine, settings, say, seconds, story)
         state = {"idea": idea, "style": style, "mode_arg": visual_mode, "seconds": seconds, "image_arg": image_style,
+                 "story_arg": story,
                  "from_project": from_project, "script": script, "done": [], "used": []} if not saved else state
     state["updated"] = time.time()
     _write_json(os.path.join(work, "state.json"), state)
@@ -1126,7 +1253,7 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     with contextlib.nullcontext(work) as tmp:
         shade = os.path.join(tmp, "shade.png")
-        make_shade(shade)
+        make_shade(shade, (story["part"], story["parts"]) if story and story.get("part") else None)
         used, clips, warnings = {tuple(u) for u in state.get("used", [])}, [], []
         done_scenes = set(state.get("done", []))
         which = settings.get("intro_button") if settings.get("intro_button") in ("subscribe", "follow", "both") else "subscribe"
@@ -1158,7 +1285,8 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
             marks_file = os.path.join(tmp, f"marks{i}.json")
             marks = _read_json(marks_file) if os.path.exists(audio) else None
             if marks is None:
-                marks = make_voice(scene["narration"], settings["voice"], audio, fake=fake_audio)
+                marks = make_voice(scene["narration"], settings["voice"], audio, fake=fake_audio,
+                                   rate=storylib.speech_rate(story))
                 _write_json(marks_file, marks)
             duration = audio_seconds(audio) + 0.25
 
@@ -1166,7 +1294,7 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
             if mode == "ai_images":
                 scene_look = IMAGE_STYLES[scene["style"]][1] if scene.get("style") in IMAGE_STYLES else look
                 visual = ai_visual(i, len(scenes), scene, scene_look, settings["ai_image_quality"],
-                                   tmp, say, base + step // 3, warnings, has_stock)
+                                   tmp, say, base + step // 3, warnings, has_stock, (story or {}).get("bible", ""))
             if not visual and has_stock:
                 say(base + step // 3, f"Scene {i + 1} of {len(scenes)}: finding footage...")
                 q = scene["visual_query"]
@@ -1236,12 +1364,19 @@ def main():
     parser.add_argument("--visuals", choices=["stock", "ai_images"],
                         help="stock = Pexels footage (default); ai_images = painted on your computer")
     parser.add_argument("--seconds", type=int, help="Video length in seconds (30 to 90)")
+    parser.add_argument("--format", choices=list(storylib.STORY_FORMATS), help="Story format (default: from settings)")
+    parser.add_argument("--tone", choices=list(storylib.TONES), help="Narrator tone")
+    parser.add_argument("--ending", choices=list(storylib.ENDINGS), help="How the video ends")
+    parser.add_argument("--bible", default="", help="Story world / look notes added to every AI picture prompt")
     parser.add_argument("--fake-audio", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    cfg = load_settings()
+    story = storylib.normalize({"format": args.format or cfg.get("story_format"), "tone": args.tone or cfg.get("story_tone"),
+                                "ending": args.ending or cfg.get("story_ending"), "bible": args.bible})
     idea = args.idea or ("" if args.demo else input("What should the video be about? ").strip())
     try:
         result = make_video(idea, args.style, args.engine, demo=args.demo, fake_audio=args.fake_audio,
-                            visual_mode=args.visuals, seconds=args.seconds)
+                            visual_mode=args.visuals, seconds=args.seconds, story=story)
     except PipelineError as err:
         sys.exit(f"\n{err}")
     print(f"\nDone! Your video: {result['video']}")

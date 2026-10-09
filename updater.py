@@ -51,9 +51,14 @@ def main():
         changed = 0
         for info in z.infolist():
             parts = info.filename.split("/", 1)
-            if info.is_dir() or len(parts) < 2 or "/" in parts[1]:   # top-level files only
+            if info.is_dir() or len(parts) < 2:
                 continue
             name = parts[1]
+            if "/" in name:   # only the tests/ and docs/ folders, one level deep
+                folder, _, base = name.partition("/")
+                if folder not in ("tests", "docs") or "/" in base or not base.endswith((".py", ".md")):
+                    continue
+                os.makedirs(os.path.join(HERE, folder), exist_ok=True)
             if name in KEEP or not (name.endswith(ALLOWED) or name in ("LICENSE",)):
                 continue
             dest = os.path.join(HERE, name)
