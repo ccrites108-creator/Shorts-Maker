@@ -279,8 +279,40 @@ footer{color:var(--muted);font-size:13px;text-align:center;padding:10px 20px 40p
     <div class="field"><label for="stone">Narrator tone</label><select id="stone"></select></div>
     <div class="field"><label for="sbible">Story world (optional)</label>
       <textarea id="sbible" style="min-height:70px" maxlength="400" placeholder="A look that stays the same in every part"></textarea></div>
+    <div class="field"><span class="lab">Pictures for the parts</span>
+      <div class="seg" data-for="smode">
+        <button type="button" data-v="stock">Stock footage<small>Real clips and photos</small></button>
+        <button type="button" data-v="ai_images">AI pictures<small>Painted on your computer</small></button>
+      </div>
+      <select id="smode" hidden><option value="stock">Stock</option><option value="ai_images">AI</option></select>
+      <div class="hint" id="smodeHint"></div>
+    </div>
+    <div class="field" id="squalityField" hidden>
+      <span class="lab">AI picture detail</span>
+      <div class="seg" data-for="squality">
+        <button type="button" data-v="fast">Fast<small>Quickest, a bit softer</small></button>
+        <button type="button" data-v="standard">Standard<small>Balanced</small></button>
+        <button type="button" data-v="high">High<small>Sharpest, slowest</small></button>
+      </div>
+      <select id="squality" hidden><option value="fast">Fast</option><option value="standard">Standard</option><option value="high">High</option></select>
+    </div>
+    <div id="saiSetup" class="notice" hidden>
+      AI pictures need a one-time download (about 7 GB) of open-source software and models.
+      Keep this window open while it downloads. If it stops, click the button again and it continues.
+      <div style="margin-top:10px"><button class="ghost" id="ssetupBtn">Set up AI pictures</button></div>
+    </div>
+    <div class="field" id="sstyleField" hidden>
+      <label for="simgstyle">Look of the AI pictures</label>
+      <select id="simgstyle"></select>
+      <div class="hint">Your story world above is added to every picture, so all parts look alike.</div>
+    </div>
+    <div class="field">
+      <label for="slength">Length of each part <span id="slengthVal" style="font-weight:600">45 seconds</span></label>
+      <input type="range" id="slength" min="30" max="90" step="5" value="45">
+      <div class="hint">TikTok pays creators on videos over 60 seconds.</div>
+    </div>
     <button class="primary needs-idle" id="planSeries">Plan my series</button>
-    <div class="hint">Needs Ollama running, like the script writer. Parts are made one at a time, using the picture and length choices on the Create tab.</div>
+    <div class="hint">Needs Ollama running, like the script writer. Parts are made one at a time with the picture and length choices above.</div>
   </div>
   <div id="seriesList"></div>
 </section>
@@ -455,18 +487,31 @@ function updateMode() {
   $('editor').classList.toggle('ai', ai);
   $('keyNotice').hidden = ai || cfg.has_key || cfg.has_pixabay_key;
   $('aiSetup').hidden = !(ai && !cfg.ai_ready);
+  $('smode').value = $('mode').value; $('squality').value = $('quality').value;
+  $('simgstyle').innerHTML = $('imgstyle').innerHTML; $('simgstyle').value = $('imgstyle').value;
+  $('squalityField').hidden = !ai; $('sstyleField').hidden = !ai;
+  $('saiSetup').hidden = !(ai && !cfg.ai_ready);
+  $('smodeHint').textContent = ai
+    ? 'Painted by an open-source AI on your own computer. Each picture can take minutes, so a part may take 15 to 30+ minutes.'
+    : 'Real video clips and photos matched to each scene.';
   syncSegs(); updateLength();
   $('modeHint').textContent = ai
     ? 'Pictures are painted by an open-source AI on your own computer. On built-in graphics each picture can take several minutes, so a video may take 15 to 30+ minutes.'
     : 'Real video clips and photos matched to each scene.';
 }
 $('mode').onchange = updateMode;
+$('smode').onchange = () => { $('mode').value = $('smode').value; updateMode(); };
+$('squality').onchange = () => { $('quality').value = $('squality').value; syncSegs(); };
+$('simgstyle').onchange = () => { $('imgstyle').value = $('simgstyle').value; };
+$('imgstyle').onchange = () => { $('simgstyle').value = $('imgstyle').value; };
+$('quality').onchange = () => { $('squality').value = $('quality').value; syncSegs(); };
+$('slength').oninput = () => { $('length').value = $('slength').value; updateLength(); };
 
 function updateLength() {
   const sec = +$('length').value, scenes = Math.max(4, Math.min(12, Math.round(sec / 7.5)));
-  $('lengthVal').textContent = sec + ' seconds';
+  $('lengthVal').textContent = sec + ' seconds'; $('slength').value = sec; $('slengthVal').textContent = sec + ' seconds';
   const pct = (sec - 30) / 60 * 100;
-  $('length').style.background = `linear-gradient(to right, var(--accent) ${pct}%, var(--card2) ${pct}%)`;
+  $('length').style.background = $('slength').style.background = `linear-gradient(to right, var(--accent) ${pct}%, var(--card2) ${pct}%)`;
   $('lengthHint').textContent = 'About ' + scenes + ' scenes.' +
     ($('mode').value === 'ai_images' ? ' With AI pictures, every scene is painted one by one, so longer videos take much longer.' : '');
 }
@@ -516,7 +561,7 @@ function watch(id, first, steps) {
 }
 function finish() {
   clearInterval(timer); loadUnfinished();
-  setBusy(false, goLabel()); $('setupBtn').disabled = false; $('progress').hidden = true;
+  setBusy(false, goLabel()); $('setupBtn').disabled = $('ssetupBtn').disabled = false; $('progress').hidden = true;
 }
 function waitingPhone() { $('side').classList.remove('empty'); $('phone').classList.remove('has'); $('phone').textContent = 'Working on it. This takes a while.'; $('meta').hidden = true; }
 
@@ -580,11 +625,12 @@ $('makeProject').onclick = async () => {
   window.scrollTo({top: 0, behavior: 'smooth'});
 };
 
+$('ssetupBtn').onclick = () => $('setupBtn').click();
 $('setupBtn').onclick = async () => {
   setError('');
   const res = await api('/api/setup-ai', {});
   if (res.error) { setError(res.error); return; }
-  $('setupBtn').disabled = true; watch(res.id, 'Starting the download...');
+  $('setupBtn').disabled = $('ssetupBtn').disabled = true; watch(res.id, 'Starting the download...');
 };
 
 async function loadUnfinished() {
