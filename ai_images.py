@@ -148,6 +148,9 @@ def _download(url, dest, on_progress):
                         on_progress(done, total)
                         last = time.time()
             on_progress(done, total)
+            if total and done < total:  # the connection closed early: keep what we have so it can continue
+                raise AIError("The download stopped early (the connection dropped). "
+                              "Click the button again and it will continue where it left off.")
     except OSError as err:
         raise AIError("The download stopped (check your internet connection). "
                       f"Click the button again and it will continue where it left off. Details: {err}") from err
@@ -346,6 +349,25 @@ def _command(exe, prompt, out_path, width, height, seed, cpu):
     return base, ["--vae-tiling", "-s", str(seed)]
 
 
+def _repair_truncated_model(log):
+    """The image program says a model file is cut short. Turn it back into a partial download so the
+    setup button finishes it (the download resumes from where the file ends). True if it did."""
+    if not re.search(r"extends beyond its model file|not in model metadata|model metadata validation failed", log):
+        return False
+    name = "qwen3.gguf" if "text_encoders" in log else "zimage.gguf"
+    path = model_path(name)
+    try:
+        if os.path.exists(path):
+            part = path + ".part"
+            if os.path.exists(part):
+                os.remove(part)
+            os.replace(path, part)
+            return True
+    except OSError:
+        pass
+    return False
+
+
 def generate_image(prompt, out_path, quality="standard", seed=None, progress=None, use_cache=True):
     """Paint one AI picture into out_path (a .png). progress(seconds_so_far) is called while waiting.
     Returns True if an earlier picture for the very same prompt was reused instead of painting a new one."""
@@ -373,6 +395,10 @@ def generate_image(prompt, out_path, quality="standard", seed=None, progress=Non
         return code, log, base + extras
 
     code, log, cmd = attempt()
+    if code != 0 and _repair_truncated_model(log):
+        raise AIError("One of the AI model files was only partly downloaded, so it couldn't be used. "
+                      "I've set it up to finish downloading. Click \"Set up AI pictures\" once more and keep "
+                      "the window open until it says AI pictures are ready, then click Continue.")
     if (code != 0 or not os.path.exists(out_path)) and sys.platform == "win32" and not using_cpu() \
             and GPU_MEMORY_PROBLEM.search(log):
         switch_to_cpu()  # the graphics chip can't hold the model: use the processor instead

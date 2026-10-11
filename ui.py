@@ -595,7 +595,7 @@ async function poll(id) {
   } else if (s.state === 'error') {
     finish();
     if (s.kind === 'video') { $('phone').classList.remove('has'); $('phone').textContent = 'Your video will appear here'; }
-    setError(s.message);
+    setError(s.message); loadSettings();
   }
 }
 
