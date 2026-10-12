@@ -36,6 +36,7 @@ AI_DIR = os.environ.get("SHORTS_AI_DIR") or os.path.join(HERE, "ai")
 SD_DIR = os.path.join(AI_DIR, "sd")
 SD_CPU_DIR = os.path.join(AI_DIR, "sd-cpu")  # plain-processor build, used if the graphics chip runs out of memory
 CPU_MARK = os.path.join(AI_DIR, "use_cpu.txt")
+CLIP_MARK = os.path.join(AI_DIR, "clip_on_cpu.txt")
 MODEL_DIR = os.path.join(AI_DIR, "models")
 
 SD_RELEASE_API = os.environ.get(
@@ -215,7 +216,7 @@ def switch_to_cpu():
 
 GPU_MEMORY_PROBLEM = re.compile(
     r"alloc.*buffer failed|failed during weight preparation|out of memory|vk::|vulkan.*(error|fail)|"
-    r"ErrorOutOfDeviceMemory|device lost", re.I)
+    r"ErrorOutOfDeviceMemory|device lost|workspace capacity check|prompt encoding failed|failed to encode prompt", re.I)
 
 
 def _pick_model_file(spec):
@@ -344,6 +345,8 @@ def _command(exe, prompt, out_path, width, height, seed, cpu):
     base = [exe, "--diffusion-model", model_path("zimage.gguf"), "--vae", model_path("ae.safetensors"),
             "--llm", model_path("qwen3.gguf"), "-p", prompt, "--cfg-scale", "1.0", "--steps", "8",
             "-H", str(height), "-W", str(width), "-o", out_path, "--diffusion-fa"]
+    if os.path.exists(CLIP_MARK) and "--clip-on-cpu" not in base:
+        base.append("--clip-on-cpu")  # the text part runs on the processor: it is what a small graphics chip couldn't fit
     if not cpu:
         base.append("--offload-to-cpu")  # keeps most of the model in normal memory, helps small graphics chips
     return base, ["--vae-tiling", "-s", str(seed)]
@@ -385,9 +388,10 @@ def generate_image(prompt, out_path, quality="standard", seed=None, progress=Non
     width, height = SIZES.get(quality, SIZES["standard"])
     seed = random.randint(1, 2 ** 31 - 1) if seed is None else seed
 
-    def attempt():
+    def attempt(more=()):
         exe = find_sd_cli()
         base, extras = _command(exe, prompt, out_path, width, height, seed, using_cpu())
+        base = base + [m for m in more if m not in base]
         cwd = os.path.dirname(exe)
         code, log = _run(base + extras, cwd, progress)
         if code != 0 and re.search(r"unknown|unrecogni[sz]ed|invalid (argument|option)", log, re.I):
@@ -401,8 +405,17 @@ def generate_image(prompt, out_path, quality="standard", seed=None, progress=Non
                       "the window open until it says AI pictures are ready, then click Continue.")
     if (code != 0 or not os.path.exists(out_path)) and sys.platform == "win32" and not using_cpu() \
             and GPU_MEMORY_PROBLEM.search(log):
-        switch_to_cpu()  # the graphics chip can't hold the model: use the processor instead
-        code, log, cmd = attempt()
+        if not os.path.exists(CLIP_MARK):
+            # first, keep only the text part on the processor and the painting on the graphics chip
+            try:
+                with open(CLIP_MARK, "w", encoding="utf-8") as f:
+                    f.write("The text part of the AI runs on the processor because the graphics chip is small. Delete this file to undo.\n")
+            except OSError:
+                pass
+            code, log, cmd = attempt(["--clip-on-cpu"])
+        if (code != 0 or not os.path.exists(out_path)) and GPU_MEMORY_PROBLEM.search(log):
+            switch_to_cpu()  # still too big for the graphics chip: use the processor instead
+            code, log, cmd = attempt()
     if code != 0 or not os.path.exists(out_path):
         try:  # keep the whole report so it can be sent to Claude
             with open(os.path.join(AI_DIR, "last_error.log"), "w", encoding="utf-8") as f:
