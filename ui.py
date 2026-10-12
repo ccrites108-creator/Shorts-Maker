@@ -105,7 +105,7 @@ input[type=range]::-moz-range-thumb{width:18px;height:18px;border-radius:50%;bac
 .check{display:flex;gap:8px;align-items:center;font-weight:400;font-size:13px;color:var(--muted)}
 .check input{width:auto}
 .ai-only,.stock-only{display:none}
-#editor.ai .ai-only{display:block}#editor:not(.ai) .stock-only{display:block}
+#editor.ai .ai-only{display:block}#editor:not(.ai) .stock-only{display:block}#editor.mix .stock-only{display:block}
 .vgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px}
 .vcard{background:var(--bg2);border:1px solid var(--line);border-radius:14px;overflow:hidden;display:flex;flex-direction:column}
 .vcard .th{aspect-ratio:9/16;background:#000;cursor:pointer;position:relative}
@@ -213,8 +213,9 @@ footer{color:var(--muted);font-size:13px;text-align:center;padding:10px 20px 40p
       <div class="seg" data-for="mode">
         <button type="button" data-v="stock">Stock footage<small>Real clips and photos</small></button>
         <button type="button" data-v="ai_images">AI pictures<small>Painted on your computer</small></button>
+        <button type="button" data-v="mix">Mix<small>Real clips and AI, alternating</small></button>
       </div>
-      <select id="mode" hidden><option value="stock">Stock</option><option value="ai_images">AI</option></select>
+      <select id="mode" hidden><option value="stock">Stock</option><option value="ai_images">AI</option><option value="mix">Mix</option></select>
       <div class="hint" id="modeHint"></div>
     </div>
     <div class="field" id="qualityField" hidden>
@@ -283,8 +284,9 @@ footer{color:var(--muted);font-size:13px;text-align:center;padding:10px 20px 40p
       <div class="seg" data-for="smode">
         <button type="button" data-v="stock">Stock footage<small>Real clips and photos</small></button>
         <button type="button" data-v="ai_images">AI pictures<small>Painted on your computer</small></button>
+        <button type="button" data-v="mix">Mix<small>Real clips and AI, alternating</small></button>
       </div>
-      <select id="smode" hidden><option value="stock">Stock</option><option value="ai_images">AI</option></select>
+      <select id="smode" hidden><option value="stock">Stock</option><option value="ai_images">AI</option><option value="mix">Mix</option></select>
       <div class="hint" id="smodeHint"></div>
     </div>
     <div class="field" id="squalityField" hidden>
@@ -481,21 +483,25 @@ async function loadSettings() {
 }
 
 function updateMode() {
-  const ai = $('mode').value === 'ai_images';
+  const ai = $('mode').value !== 'stock', mix = $('mode').value === 'mix';
   $('qualityField').hidden = !ai;
   $('styleField').hidden = !ai;
-  $('editor').classList.toggle('ai', ai);
-  $('keyNotice').hidden = ai || cfg.has_key || cfg.has_pixabay_key;
+  $('editor').classList.toggle('ai', ai); $('editor').classList.toggle('mix', mix);
+  $('keyNotice').hidden = (ai && !mix) || cfg.has_key || cfg.has_pixabay_key;
   $('aiSetup').hidden = !(ai && !cfg.ai_ready);
   $('smode').value = $('mode').value; $('squality').value = $('quality').value;
   $('simgstyle').innerHTML = $('imgstyle').innerHTML; $('simgstyle').value = $('imgstyle').value;
   $('squalityField').hidden = !ai; $('sstyleField').hidden = !ai;
   $('saiSetup').hidden = !(ai && !cfg.ai_ready);
-  $('smodeHint').textContent = ai
+  $('smodeHint').textContent = mix
+    ? 'Real clips on parts of the story, AI pictures on the rest, alternating scene by scene.'
+    : ai
     ? 'Painted by an open-source AI on your own computer. Each picture can take minutes, so a part may take 15 to 30+ minutes.'
     : 'Real video clips and photos matched to each scene.';
   syncSegs(); updateLength();
-  $('modeHint').textContent = ai
+  $('modeHint').textContent = mix
+    ? 'Real video clips on scenes 1, 3, 5... and AI pictures on scenes 2, 4, 6... Real footage gives true motion; AI covers what cannot be filmed. Needs a Pixabay key and AI set up.'
+    : ai
     ? 'Pictures are painted by an open-source AI on your own computer. On built-in graphics each picture can take several minutes, so a video may take 15 to 30+ minutes.'
     : 'Real video clips and photos matched to each scene.';
 }
@@ -513,7 +519,7 @@ function updateLength() {
   const pct = (sec - 30) / 60 * 100;
   $('length').style.background = $('slength').style.background = `linear-gradient(to right, var(--accent) ${pct}%, var(--card2) ${pct}%)`;
   $('lengthHint').textContent = 'About ' + scenes + ' scenes.' +
-    ($('mode').value === 'ai_images' ? ' With AI pictures, every scene is painted one by one, so longer videos take much longer.' : '');
+    ($('mode').value !== 'stock' ? ' With AI pictures, every scene is painted one by one, so longer videos take much longer.' : '');
 }
 $('length').oninput = updateLength;
 
@@ -720,7 +726,7 @@ function renderEditor() {
     box.append(card);
   });
   updateProjLen(); renderBeatBar();
-  $('editor').classList.toggle('ai', $('mode').value === 'ai_images');
+  $('editor').classList.toggle('ai', $('mode').value !== 'stock'); $('editor').classList.toggle('mix', $('mode').value === 'mix');
 }
 function moveScene(i, d) { const j = i + d, s = project.scenes; if (j < 0 || j >= s.length) return; [s[i], s[j]] = [s[j], s[i]]; renderEditor(); }
 function removeScene(i) { project.scenes.splice(i, 1); renderEditor(); }

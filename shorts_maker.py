@@ -1025,6 +1025,9 @@ def camera_move(idx, frames):
         (held, f"(iw-iw/zoom)*(1-{t})", cy),                 # pan left
         (zoom_in, cx, "(ih-ih/zoom)*0.25"),                  # push in toward the upper part
         (held, cx, f"(ih-ih/zoom)*(1-{t})"),                 # tilt up
+        (zoom_in, f"(iw-iw/zoom)*{t}", f"(ih-ih/zoom)*{t}"),   # push in while drifting down and right
+        (zoom_out, f"(iw-iw/zoom)*(1-{t})", f"(ih-ih/zoom)*(1-{t})"),  # pull out while drifting up and left
+        ("1.12+0.03*sin(on/38)", f"(iw-iw/zoom)/2+iw*0.012*sin(on/21)", f"(ih-ih/zoom)/2+ih*0.012*cos(on/27)"),  # gentle hand-held sway
     ]
     return moves[idx % len(moves)]
 
@@ -1049,7 +1052,9 @@ def build_scene(idx, kind, bg_path, audio_path, shade_png, caps, duration, out_p
     else:  # a still picture: slow camera move
         frames = int(duration * FPS) + 2
         z, x, y = camera_move(idx, frames)
-        chain = (f"[0:v]zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={WIDTH}x{HEIGHT}:fps={FPS},setsar=1,{GRADE}[bg]")
+        # a slow light "breath", a soft vignette and moving film grain make a still picture feel filmed
+        life = "eq=brightness='0.02*sin(2*PI*t/3.5)':eval=frame,vignette=PI/6:eval=init,noise=alls=6:allf=t"
+        chain = (f"[0:v]zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={WIDTH}x{HEIGHT}:fps={FPS},setsar=1,{GRADE},{life}[bg]")
     chain += ";[bg][1:v]overlay=0:0:format=auto[v0]"
     for i, (_, a, b) in enumerate(caps):
         chain += (f";[v{i}][{2 + i}:v]overlay=x=0:y={CAPTION_Y}:format=auto:"
@@ -1198,7 +1203,9 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
 
     settings = load_settings()
     mode = visual_mode or settings["visual_mode"]
-    if mode == "ai_images" and not ai_images.ai_ready():
+    if mode == "mix" and not ai_images.ai_ready():
+        mode = "stock"   # the AI part isn't installed here, so use real footage only
+    if mode in ("ai_images", "mix") and not ai_images.ai_ready():
         raise PipelineError("AI images aren't set up yet. Click \"Set up AI images\" on the page "
                             "(a one-time download), or switch Visuals to Stock footage.")
 
@@ -1236,6 +1243,8 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
     scenes = script["scenes"]
     look = IMAGE_STYLES[chosen][1] if chosen in IMAGE_STYLES else (script.get("visual_style") or DEFAULT_LOOK)
     has_stock = bool(settings["pexels_key"] or settings["pixabay_key"])
+    if mode == "mix" and not has_stock:
+        mode = "ai_images"  # nothing to mix the AI pictures with
     if mode == "stock" and not has_stock and ai_images.ai_ready():
         mode = "ai_images"  # no stock key, but AI images are installed: use them instead of plain colors
         say(8, "No stock footage key is set, so this video will use AI images instead.")
@@ -1291,7 +1300,7 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
             duration = audio_seconds(audio) + 0.25
 
             visual = None
-            if mode == "ai_images":
+            if mode == "ai_images" or (mode == "mix" and i % 2 == 1):   # in a mix, scenes 2, 4, 6... are AI pictures
                 scene_look = IMAGE_STYLES[scene["style"]][1] if scene.get("style") in IMAGE_STYLES else look
                 visual = ai_visual(i, len(scenes), scene, scene_look, settings["ai_image_quality"],
                                    tmp, say, base + step // 3, warnings, has_stock, (story or {}).get("bible", ""))
@@ -1361,7 +1370,7 @@ def main():
     parser.add_argument("--demo", action="store_true", help="Use a built-in sample script")
     parser.add_argument("--engine", choices=["ollama", "claude"], default="ollama",
                         help="Who writes the script (default: free open-source model via Ollama)")
-    parser.add_argument("--visuals", choices=["stock", "ai_images"],
+    parser.add_argument("--visuals", choices=["stock", "ai_images", "mix"],
                         help="stock = Pexels footage (default); ai_images = painted on your computer")
     parser.add_argument("--seconds", type=int, help="Video length in seconds (30 to 90)")
     parser.add_argument("--format", choices=list(storylib.STORY_FORMATS), help="Story format (default: from settings)")

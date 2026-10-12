@@ -394,8 +394,8 @@ class Handler(BaseHTTPRequestHandler):
         script = body.get("script") if isinstance(body.get("script"), dict) else None
         if not idea and not script:
             return self.send_json({"error": "Type an idea first."}, 400)
-        mode = body.get("mode") if body.get("mode") in ("stock", "ai_images") else None
-        if mode == "ai_images" and not ai.ai_ready():
+        mode = body.get("mode") if body.get("mode") in ("stock", "ai_images", "mix") else None
+        if mode in ("ai_images", "mix") and not ai.ai_ready():
             return self.send_json({"error": "AI images aren't set up yet. Click \"Set up AI images\" first."}, 400)
         story = story_from_body(body)
         remember = {}
@@ -419,7 +419,7 @@ class Handler(BaseHTTPRequestHandler):
         st = sm.get_unfinished(str(body.get("key", "")))
         if not st:
             return self.send_json({"error": "That unfinished video is no longer available."}, 404)
-        if st.get("mode_arg") == "ai_images" and not ai.ai_ready():
+        if st.get("mode_arg") in ("ai_images", "mix") and not ai.ai_ready():
             return self.send_json({"error": "AI images aren't set up on this computer."}, 400)
         self.start("video", run_job, st.get("idea", ""), st.get("style", ""), st.get("mode_arg"), st.get("seconds"),
                    st["script"] if st.get("from_project") else None, st.get("image_arg"), st.get("story_arg"),
