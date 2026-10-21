@@ -16,6 +16,8 @@ import re
 import time
 import uuid
 
+import episodes as eplib
+
 # --------------------------------------------------------------------------- story formats
 
 STORY_FORMATS = {
@@ -68,6 +70,15 @@ STORY_FORMATS = {
         "guide": "Take the viewer on a trip. Each scene is a new stop that is bigger, older or stranger "
                  "than the last, ending at the most mind-bending place.",
     },
+    "episode": {
+        "name": "Character episode",
+        "tagline": "Your main character's next adventure",
+        "beats": eplib.EPISODE_BEATS,
+        "guide": "Tell one small, complete adventure. Open on the hero facing something huge, show what they want, "
+                 "let the first plan go wrong in a funny way, then a clever twist with an everyday object wins the day, "
+                 "and end on the happy payoff.",
+        "hidden": True,  # made from the Episodes tab, which adds the character
+    },
 }
 
 DEFAULT_FORMAT = "explainer"
@@ -82,6 +93,8 @@ TONES = {
     "dramatic": ("Dramatic", "dramatic trailer voice with big, vivid words and a strong sense of stakes", "-4%"),
     "friendly": ("Friendly", "warm, curious friend explaining something cool over coffee", "+3%"),
     "playful": ("Playful", "witty, lightly funny narrator who is never mean", "+5%"),
+    "storybook": ("Storybook", "warm, gently funny storybook narrator with short, punchy, vivid sentences, "
+                               "who sounds amazed by every small victory", "+0%"),
 }
 
 DEFAULT_TONE = "documentary"
@@ -117,6 +130,17 @@ def normalize(raw):
         "ending": _pick(raw.get("ending"), ENDINGS, DEFAULT_ENDING),
         "bible": " ".join(str(raw.get("bible") or "").split())[:400],
     }
+    if story["format"] == "episode" or isinstance(raw.get("character"), dict):
+        try:
+            number = max(1, int(raw.get("episode") or 1))
+        except (TypeError, ValueError):
+            number = 1
+        past = raw.get("past") if isinstance(raw.get("past"), list) else []
+        story.update(format="episode", character=eplib.clean_character(raw.get("character")), episode=number,
+                     idea=" ".join(str(raw.get("idea") or "").split())[:300],
+                     past=[" ".join(str(p).split())[:100] for p in past][:12],
+                     episode_id=str(raw.get("episode_id") or "")[:16])
+        return story
     try:
         part, parts = int(raw.get("part") or 0), int(raw.get("parts") or 0)
     except (TypeError, ValueError):
@@ -153,6 +177,8 @@ def story_block(story):
         ". A beat may take two scenes but never skip one, and each scene's \"beat\" field names the beat it belongs to.",
         "Narrator voice: " + TONES[story["tone"]][1] + ". Write every line so it sounds like that when read aloud.",
     ]
+    if story.get("character"):
+        lines.append(eplib.character_block(story))
     if story.get("bible"):
         lines.append("Story world and recurring look (work this into every image_prompt so the pictures feel like one "
                      "story): " + story["bible"])

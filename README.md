@@ -5,6 +5,11 @@ Free, open source (MIT) and everything runs on your own computer.
 
 ## Features
 
+- **Character episodes** (the Episodes tab): one main character, a new self-contained adventure in every video.
+  It starts with Pip, a palm-sized robot in a giant house, and you can change the name, look, art style, world,
+  side characters and narrator voice. Each episode follows the same beats (hook, goal, attempt and fail, clever twist,
+  payoff), flows as one continuous story, is told by a narrator and plays the hero's "bip-bip!" the moment they win.
+  Episodes are numbered and remembered so new ones never repeat. From the command line: `python shorts_maker.py --episode`.
 - **Story formats**: Fact explainer, Mystery, Countdown, What if..., Myth vs truth, Legend, Journey. Each one gives the script a beat structure (hook, setup, twist...).
 - **Narrator tones** (documentary, mysterious, energetic, dramatic, friendly, playful) that change both the writing and the voice speed.
 - **Endings**: invite to follow, cliffhanger, seamless loop, or a question for the comments.
@@ -33,6 +38,7 @@ It checks GitHub for updates each time it starts (source in `update_source.txt`)
 | `app.py` | Local web server and job runner |
 | `ui.py` | The whole web page (HTML/CSS/JS) |
 | `story.py` | Story formats, tones, endings, series helpers |
+| `episodes.py` | Main character, episode log and the success sound |
 | `shorts_maker.py` | Script writing, voice, visuals, video building |
 | `ai_images.py` | Local AI picture setup and generation |
 | `updater.py` | Self-updater |

@@ -45,9 +45,10 @@ from PIL import Image, ImageDraw, ImageFont
 import imageio_ffmpeg
 
 import ai_images
+import episodes as eplib
 import story as storylib
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(HERE, "output")
@@ -285,7 +286,8 @@ def clean_script(data):
                            "beat": " ".join(str(s.get("beat") or "").split())[:30],
                            "visual_query": str(s.get("visual_query") or s.get("visual") or "").strip(),
                            "image_prompt": str(s.get("image_prompt") or "").strip(),
-                           "style": style_key, "fresh": bool(s.get("fresh"))})
+                           "style": style_key, "fresh": bool(s.get("fresh")),
+                           "sfx": "success" if str(s.get("sfx") or "").lower() == "success" else ""})
     if len(scenes) < 2:
         raise ValueError("too few scenes")
     scenes = scenes[:14]
@@ -388,6 +390,33 @@ def plan_series(topic, parts, fmt, tone, settings, bible="", engine="ollama"):
     fallback["bible"] = bible
     fallback["note"] = f"The AI model couldn't plan this series ({last}), so these are plain placeholders. Edit them or try again."
     return fallback
+
+
+IDEAS_PROMPT = """You plan episodes of a YouTube Shorts series about one main character.
+
+{character}
+Already made or planned (do not repeat these): {past}
+
+Suggest {count} NEW episode ideas. Each is one small, self-contained adventure that fits in about 35 seconds:
+a goal, a first try that goes wrong in a funny way, and a clever twist that wins. Mix places and props from the world.
+
+Return ONLY valid JSON: {{"ideas": ["Short title: one sentence with the mission and the clever twist", ...]}}"""
+
+
+def suggest_episode_ideas(character, past, settings, count=5, engine="ollama"):
+    """New adventure ideas for the character. Returns a list of strings (empty if the model couldn't help)."""
+    ask = ask_ollama if engine == "ollama" else ask_claude
+    sheet = eplib.character_block({"character": character, "episode": 0}).split("\n")[1:3]
+    prompt = IDEAS_PROMPT.format(character="\n".join(sheet), past="; ".join(past) or "nothing yet", count=count)
+    for _ in range(3):
+        try:
+            data = _first_json(re.sub(r"```(?:json)?", "", ask(prompt, settings)))
+            ideas = [" ".join(str(x).split())[:300] for x in data.get("ideas", []) if str(x).strip()]
+            if ideas:
+                return ideas[:count]
+        except (ValueError, AttributeError, TypeError):
+            continue
+    return []
 
 
 REWRITE_PROMPT = """You are editing ONE scene of a YouTube Short script. Rewrite only that scene.
@@ -517,7 +546,17 @@ def sanitize_scenes(script, topic):
 
 
 def apply_story(script, story):
-    """Small fixes after the model has written: a series part gets its part number in the title and description."""
+    """Small fixes after the model has written: a series part gets its part number in the title and description,
+    and a character episode gets the character's name and episode number."""
+    if story and story.get("character"):
+        name, n = story["character"]["name"], story["episode"]
+        title = re.sub(r"\s*#shorts\b", "", script["title"], flags=re.I).strip() or story.get("idea", "")[:50]
+        if name.lower() not in title.lower():
+            title = f"{name}: {title}"
+        script["title"] = f"{title} | Ep {n} #shorts"[:100]
+        script["description"] = f"{name}'s adventure, episode {n}. " + script["description"]
+        if not any(sc.get("sfx") for sc in script["scenes"]):  # the model forgot: the win is the last-but-one or last scene
+            script["scenes"][-2 if len(script["scenes"]) > 3 else -1]["sfx"] = "success"
     if story and story.get("part"):
         tag = f"Part {story['part']}/{story['parts']}"
         name = story.get("series_title") or script["title"].replace("#shorts", "").strip()
@@ -966,6 +1005,15 @@ def make_voice(text, voice, path, fake=False, rate="+0%"):
                             f"(they come from Microsoft's online service). Details: {err}")
 
 
+def add_success_sound(voice_path, sound_path, out_path, gap=0.15):
+    """The voice, a short pause, then the success sound, as one audio file."""
+    run_ffmpeg([FFMPEG, "-y", "-i", voice_path, "-i", sound_path, "-filter_complex",
+                f"[0:a]aresample=44100,aformat=channel_layouts=mono,apad=pad_dur={gap}[v];"
+                "[1:a]aresample=44100,aformat=channel_layouts=mono,volume=0.9[s];"
+                "[v][s]concat=n=2:v=0:a=1[out]", "-map", "[out]", "-c:a", "aac", "-b:a", "160k", out_path],
+               "adding the success sound")
+
+
 def audio_seconds(path):
     r = subprocess.run([FFMPEG, "-i", path], capture_output=True, text=True, errors="replace")
     m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", r.stderr)
@@ -1098,7 +1146,7 @@ def slugify(text):
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:50] or "video"
 
 
-def ai_visual(i, n, scene, look, quality, tmp, say, pct, warnings, can_fall_back, bible=""):
+def ai_visual(i, n, scene, look, quality, tmp, say, pct, warnings, can_fall_back, bible="", seed=None):
     """Paint an AI picture for one scene on this computer. Returns ('image', path) or None."""
     subject = scene.get("image_prompt") or scene.get("visual_query") or scene["narration"]
     prompt = (f"{subject}. {bible + '. ' if bible else ''}{look}. Vertical composition. "
@@ -1112,7 +1160,7 @@ def ai_visual(i, n, scene, look, quality, tmp, say, pct, warnings, can_fall_back
 
     say(pct, label + "...")
     try:
-        reused = ai_images.generate_image(prompt, path, quality, progress=tick, use_cache=not scene.get("fresh"))
+        reused = ai_images.generate_image(prompt, path, quality, seed=seed, progress=tick, use_cache=not scene.get("fresh"))
         if reused:
             say(pct, f"Scene {i + 1} of {n}: reusing the picture painted earlier.")
     except ai_images.AIError as err:
@@ -1241,7 +1289,13 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
     state["updated"] = time.time()
     _write_json(os.path.join(work, "state.json"), state)
     scenes = script["scenes"]
+    character = (story or {}).get("character")
     look = IMAGE_STYLES[chosen][1] if chosen in IMAGE_STYLES else (script.get("visual_style") or DEFAULT_LOOK)
+    picture_notes, seed, voice = (story or {}).get("bible", ""), None, settings["voice"]
+    if character:   # every picture gets the character's exact look, and the same narrator tells every episode
+        picture_notes, seed, voice = eplib.picture_notes(story), character["seed"], character.get("voice") or voice
+        if chosen not in IMAGE_STYLES:
+            look = character["art_style"]
     has_stock = bool(settings["pexels_key"] or settings["pixabay_key"])
     if mode == "mix" and not has_stock:
         mode = "ai_images"  # nothing to mix the AI pictures with
@@ -1278,6 +1332,11 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
         make_subscribe_sounds(sfx_path, 6.0, [b["times"] for b in badges])
         subscribe_cards = {"badges": badges, "sfx": sfx_path}
         short_idea = " ".join((idea or script["title"]).replace("#shorts", "").split()[:4])
+        success_sound = None
+        if character and any(sc.get("sfx") == "success" for sc in scenes):
+            success_sound = character.get("sound_file") if os.path.isfile(character.get("sound_file") or "") else None
+            if not success_sound:
+                success_sound = eplib.make_success_sound(os.path.join(tmp, "success.wav"))
 
         for i, scene in enumerate(scenes):
             base = 10 + int(80 * i / len(scenes))
@@ -1294,16 +1353,22 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
             marks_file = os.path.join(tmp, f"marks{i}.json")
             marks = _read_json(marks_file) if os.path.exists(audio) else None
             if marks is None:
-                marks = make_voice(scene["narration"], settings["voice"], audio, fake=fake_audio,
+                marks = make_voice(scene["narration"], voice, audio, fake=fake_audio,
                                    rate=storylib.speech_rate(story))
                 _write_json(marks_file, marks)
-            duration = audio_seconds(audio) + 0.25
+            speech = audio_seconds(audio) + 0.25
+            duration, sound_at = speech, None
+            if success_sound and scene.get("sfx") == "success":   # a beat of silence, then the character's happy sound
+                with_sound = os.path.join(tmp, f"s{i}_fx.m4a")
+                add_success_sound(audio, success_sound, with_sound)
+                audio, sound_at = with_sound, speech + 0.15
+                duration = audio_seconds(with_sound) + 0.2
 
             visual = None
             if mode == "ai_images" or (mode == "mix" and i % 2 == 1):   # in a mix, scenes 2, 4, 6... are AI pictures
                 scene_look = IMAGE_STYLES[scene["style"]][1] if scene.get("style") in IMAGE_STYLES else look
                 visual = ai_visual(i, len(scenes), scene, scene_look, settings["ai_image_quality"],
-                                   tmp, say, base + step // 3, warnings, has_stock, (story or {}).get("bible", ""))
+                                   tmp, say, base + step // 3, warnings, has_stock, picture_notes, seed)
             if not visual and has_stock:
                 say(base + step // 3, f"Scene {i + 1} of {len(scenes)}: finding footage...")
                 q = scene["visual_query"]
@@ -1322,13 +1387,17 @@ def make_video(idea, style="", engine="ollama", progress=None, demo=False, fake_
 
             say(base + 2 * step // 3, f"Scene {i + 1} of {len(scenes)}: adding captions and assembling...")
             words = [w for w in scene["narration"].split() if re.search(r"\w", w)]
-            windows = word_windows(words, marks, duration)
+            windows = word_windows(words, marks, speech)
             caps = []
             for chunk in chunk_words(words):
                 for wi in chunk:
                     png = os.path.join(tmp, f"c{i}_{wi}.png")
                     render_caption([words[j] for j in chunk], chunk.index(wi), png)
                     caps.append((png, *windows[wi]))
+            if sound_at is not None:   # the sound gets its own big caption, e.g. "bip-bip!"
+                png = os.path.join(tmp, f"c{i}_fx.png")
+                render_caption([character["success_sound"].upper()], 0, png)
+                caps.append((png, sound_at, duration))
             scene_len = duration
             if i == 0:  # a short opening line is stretched a little so every intro button gets its full moment
                 scene_len = max(duration, max(b["times"][2] for b in badges) + 0.2)
@@ -1377,17 +1446,32 @@ def main():
     parser.add_argument("--tone", choices=list(storylib.TONES), help="Narrator tone")
     parser.add_argument("--ending", choices=list(storylib.ENDINGS), help="How the video ends")
     parser.add_argument("--bible", default="", help="Story world / look notes added to every AI picture prompt")
+    parser.add_argument("--episode", action="store_true",
+                        help="Make the next episode starring your main character (set up on the Episodes tab). "
+                             "Without an idea it uses the next unused idea from the character's list.")
     parser.add_argument("--fake-audio", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     cfg = load_settings()
     story = storylib.normalize({"format": args.format or cfg.get("story_format"), "tone": args.tone or cfg.get("story_tone"),
                                 "ending": args.ending or cfg.get("story_ending"), "bible": args.bible})
-    idea = args.idea or ("" if args.demo else input("What should the video be about? ").strip())
+    seconds = args.seconds
+    if args.episode:
+        character, past = eplib.load_character(SETTINGS_DIR), eplib.load_episodes(SETTINGS_DIR)
+        idea = args.idea or next(iter(eplib.unused_ideas(character, past)), "")
+        if not idea:
+            sys.exit("Every idea on the list has been made. Type one: python shorts_maker.py --episode \"your idea\"")
+        story = storylib.normalize(eplib.story_for_episode(character, idea, eplib.next_number(SETTINGS_DIR), past))
+        seconds = seconds or character["seconds"]
+        print(f"Episode {story['episode']} starring {character['name']}: {idea}")
+    else:
+        idea = args.idea or ("" if args.demo else input("What should the video be about? ").strip())
     try:
         result = make_video(idea, args.style, args.engine, demo=args.demo, fake_audio=args.fake_audio,
-                            visual_mode=args.visuals, seconds=args.seconds, story=story)
+                            visual_mode=args.visuals, seconds=seconds, story=story)
     except PipelineError as err:
         sys.exit(f"\n{err}")
+    if story and story.get("character"):
+        eplib.record_episode(SETTINGS_DIR, story, result["title"], result["name"])
     print(f"\nDone! Your video: {result['video']}")
 
 

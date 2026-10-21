@@ -5,7 +5,8 @@ Run this file (or double-click "Start Shorts Maker.bat"). Your browser opens a p
 where you type an idea and get a finished short vertical video.
 Everything runs on your own computer; nothing here is reachable from the internet.
 
-The page itself (HTML, CSS, JavaScript) lives in ui.py. The story tools live in story.py.
+The page itself (HTML, CSS, JavaScript) lives in ui.py. The story tools live in story.py,
+and the main character and episode log live in episodes.py.
 
 License: MIT (see LICENSE)
 """
@@ -23,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 import ai_images as ai
+import episodes as eplib
 import shorts_maker as sm
 import story as storylib
 from ui import PAGE
@@ -108,6 +110,8 @@ def run_job(job_id, idea, style, mode, seconds=None, script=None, image_style=No
                                image_style=image_style, story=story)
         if story and story.get("series_id") and story.get("part"):  # remember which part of the series this is
             storylib.mark_part_done(sm.SETTINGS_DIR, story["series_id"], story["part"] - 1, result["name"])
+        if story and story.get("character"):  # remember the episode, so the next one gets the next number
+            eplib.record_episode(sm.SETTINGS_DIR, story, result["title"], result["name"])
         job.update(state="done", pct=100, message="Done!", result={
             "name": result["name"], "title": result["title"],
             "description": result["description"], "script": result["script"],
@@ -146,6 +150,29 @@ def run_rewrite(job_id, script, index, instruction, story):
         scene = sm.rewrite_scene(script, index, instruction, sm.load_settings(), story)
         job.update(state="done", pct=100, message="Scene rewritten.", result={"index": index, "scene": scene})
     guarded(job, work)
+
+
+def run_episode_ideas(job_id):
+    job = JOBS[job_id]
+
+    def work():
+        job["message"] = "Thinking up new adventures..."
+        character = eplib.load_character(sm.SETTINGS_DIR)
+        past = [e.get("title") or e.get("idea", "") for e in eplib.load_episodes(sm.SETTINGS_DIR)] + character["ideas"]
+        ideas = sm.suggest_episode_ideas(character, past[-30:], sm.load_settings())
+        if ideas:
+            character["ideas"] = character["ideas"] + [i for i in ideas if i not in character["ideas"]]
+            eplib.save_character(sm.SETTINGS_DIR, character)
+        job.update(state="done", pct=100, message="Ideas added." if ideas else "No new ideas this time.",
+                   result={"ideas": ideas})
+    guarded(job, work)
+
+
+def episodes_state():
+    character = eplib.load_character(sm.SETTINGS_DIR)
+    episodes = eplib.load_episodes(sm.SETTINGS_DIR)
+    return {"character": character, "episodes": episodes, "next_number": eplib.next_number(sm.SETTINGS_DIR),
+            "ideas_left": eplib.unused_ideas(character, episodes), "voices": VOICES}
 
 
 def run_series_plan(job_id, topic, parts, fmt, tone, bible):
@@ -189,14 +216,23 @@ def list_videos():
 def story_options():
     return {
         "formats": [{"key": k, "name": v["name"], "tagline": v["tagline"], "beats": v["beats"]}
-                    for k, v in storylib.STORY_FORMATS.items()],
+                    for k, v in storylib.STORY_FORMATS.items() if not v.get("hidden")],
         "tones": [{"key": k, "name": v[0]} for k, v in storylib.TONES.items()],
         "endings": [{"key": k, "name": v[0]} for k, v in storylib.ENDINGS.items()],
     }
 
 
 def story_from_body(body):
-    """Build the story settings for a request. A series part takes its story from the series."""
+    """Build the story settings for a request. A series part takes its story from the series, and an episode
+    takes its story from the saved main character."""
+    if str(body.get("episode_idea") or "").strip():
+        try:
+            number = max(1, int(body.get("episode_number") or 0)) or None
+        except (TypeError, ValueError):
+            number = None
+        return storylib.normalize(eplib.story_for_episode(
+            eplib.load_character(sm.SETTINGS_DIR), str(body["episode_idea"]).strip(),
+            number or eplib.next_number(sm.SETTINGS_DIR), eplib.load_episodes(sm.SETTINGS_DIR)))
     series_id, index = body.get("series_id"), body.get("part_index")
     if storylib.slug_ok(series_id) and isinstance(index, int):
         series = next((s for s in storylib.load_series(sm.SETTINGS_DIR) if s["id"] == series_id), None)
@@ -307,6 +343,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(story_options())
         elif url.path == "/api/series":
             self.send_json({"items": storylib.load_series(sm.SETTINGS_DIR)})
+        elif url.path == "/api/episodes":
+            self.send_json(episodes_state())
         elif url.path == "/api/unfinished":
             self.send_json({"items": sm.list_unfinished()[:3]})
         elif url.path == "/api/videos":
@@ -379,6 +417,20 @@ class Handler(BaseHTTPRequestHandler):
             items = [s for s in storylib.load_series(sm.SETTINGS_DIR) if s.get("id") != sid]
             storylib.save_series(sm.SETTINGS_DIR, items)
             return self.send_json({"ok": True})
+        if route == "/api/character/save":
+            eplib.save_character(sm.SETTINGS_DIR, body.get("character"))
+            return self.send_json(episodes_state())
+        if route == "/api/character/reset":
+            eplib.save_character(sm.SETTINGS_DIR, eplib.DEFAULT_CHARACTER)
+            return self.send_json(episodes_state())
+        if route == "/api/episodes/ideas":
+            return self.start("ideas", run_episode_ideas, pct=10)
+        if route == "/api/episodes/delete":
+            try:
+                eplib.delete_episode(sm.SETTINGS_DIR, int(body.get("number")))
+            except (TypeError, ValueError):
+                return self.send_json({"error": "Unknown episode."}, 400)
+            return self.send_json(episodes_state())
         if route == "/api/reveal":
             return self.post_reveal(body)
         if route == "/api/delete":
@@ -409,7 +461,7 @@ class Handler(BaseHTTPRequestHandler):
             remember["intro_button"] = body["intro"]
         image_style = body.get("image_style") if body.get("image_style") in sm.IMAGE_STYLES else "auto"
         remember["image_style"] = image_style
-        if story and not story.get("part"):   # a series part follows its series, so don't overwrite the person's usual choices
+        if story and not story.get("part") and not story.get("character"):   # a series part follows its series, so don't overwrite the person's usual choices
             remember.update(story_format=story["format"], story_tone=story["tone"], story_ending=story["ending"])
         sm.save_settings(remember)
         self.start("video", run_job, idea, str(body.get("style", "")).strip(), mode, seconds, script,
