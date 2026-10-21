@@ -127,12 +127,15 @@ details>summary{cursor:pointer;font-weight:600}
 footer{color:var(--muted);font-size:13px;text-align:center;padding:10px 20px 40px}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 .grid.solo{grid-template-columns:minmax(0,760px)}
+.epnum{display:inline-block;font-size:12px;font-weight:700;padding:3px 10px;border-radius:980px;background:rgba(34,211,238,.14);color:var(--accent2);margin-bottom:10px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:560px){.two{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 <header class="top"><div class="in">
   <div class="brand"><span class="logo">S</span>Shorts Maker</div>
   <nav class="tabs" role="tablist">
+    <button class="tab" data-tab="episodes" role="tab">Episodes</button>
     <button class="tab on" data-tab="create" role="tab">Create</button>
     <button class="tab" data-tab="series" role="tab">Series</button>
     <button class="tab" data-tab="library" role="tab">Library</button>
@@ -263,6 +266,70 @@ footer{color:var(--muted);font-size:13px;text-align:center;padding:10px 20px 40p
   </div>
 </section>
 
+<!-- ======================= EPISODES ======================= -->
+<section class="panel" id="tab-episodes" hidden>
+  <h1 id="epHead">Episodes</h1>
+  <p class="sub">One main character, a new adventure every video. Each episode is a complete little story told by a narrator, and it gets a happy sound the moment the hero wins.</p>
+  <div class="card">
+    <span class="epnum" id="epNum">Episode 1</span>
+    <div class="field">
+      <label for="epIdea">What happens in this episode?</label>
+      <textarea id="epIdea" placeholder="e.g. Pip climbs the bookshelf to see the sunrise"></textarea>
+      <div class="chips" id="epIdeas"></div>
+      <div class="row" style="margin-top:10px"><button class="ghost needs-idle" id="epSuggest" type="button">Suggest new ideas</button>
+        <span class="hint" style="margin:0">Needs Ollama running, like the script writer.</span></div>
+    </div>
+    <div class="field">
+      <label for="epLength">Length <span id="epLengthVal" style="font-weight:600">35 seconds</span></label>
+      <input type="range" id="epLength" min="30" max="90" step="5" value="35">
+      <div class="hint">30 to 45 seconds keeps people watching to the end, so the Short replays.</div>
+    </div>
+    <div id="epAiNotice" class="notice" hidden>
+      Your character only shows up in AI pictures, so set them up once (about 7 GB, free).
+      <div style="margin-top:10px"><button class="ghost" id="epSetupBtn" type="button">Set up AI pictures</button></div>
+    </div>
+    <button class="primary needs-idle" id="makeEp">Make episode</button>
+    <div class="hint">Uses AI pictures with your character's look in every scene, the same narrator voice every time, and ends so it loops back to the start.</div>
+  </div>
+
+  <div class="card">
+    <details id="charBox">
+      <summary id="charSum">Main character</summary>
+      <div style="margin-top:14px">
+        <div class="two">
+          <div class="field"><label for="chName">Name</label><input id="chName" maxlength="40"></div>
+          <div class="field"><label for="chPronoun">Narrator calls them</label><input id="chPronoun" maxlength="10" placeholder="he, she, they"></div>
+        </div>
+        <div class="field"><label for="chLook">Exact look (added to every picture)</label>
+          <textarea id="chLook" maxlength="700"></textarea>
+          <div class="hint">Name the colors and parts that must never change. The more exact, the more alike every episode looks.</div></div>
+        <div class="field"><label for="chArt">Art style</label><textarea id="chArt" style="min-height:60px" maxlength="400"></textarea></div>
+        <div class="field"><label for="chPersonality">Personality</label><input id="chPersonality" maxlength="300"></div>
+        <div class="field"><label for="chWorld">World and recurring places</label><textarea id="chWorld" style="min-height:60px" maxlength="500"></textarea></div>
+        <div class="field"><label for="chSidekicks">Recurring side characters (optional)</label><input id="chSidekicks" maxlength="300"></div>
+        <div class="field"><label class="check"><input type="checkbox" id="chSpeaks"> The character can say a few words (otherwise only the narrator talks)</label></div>
+        <div class="two">
+          <div class="field"><label for="chSound">Success sound caption</label><input id="chSound" maxlength="30" placeholder="bip-bip!"></div>
+          <div class="field"><label for="chVoice">Narrator voice</label><select id="chVoice"></select></div>
+        </div>
+        <div class="field"><label for="chSoundFile">Your own success sound file (optional)</label>
+          <input id="chSoundFile" maxlength="400" placeholder="e.g. C:\Users\you\Music\bipbip.wav">
+          <div class="hint">Leave empty to use the built-in robot "bip-bip". It plays after a short pause, right when the hero wins.</div></div>
+        <div class="two">
+          <div class="field"><label for="chSeconds">Usual length (seconds)</label><input id="chSeconds" type="number" min="30" max="90"></div>
+          <div class="field"><label for="chSeed">Picture seed</label><input id="chSeed" type="number" min="1">
+            <div class="hint">Keep it the same so pictures stay alike.</div></div>
+        </div>
+        <div class="field"><label for="chIdeas">Episode ideas (one per line)</label><textarea id="chIdeas" style="min-height:140px"></textarea></div>
+        <div class="row"><button class="ghost" id="chSave" type="button">Save character</button>
+          <button class="mini" id="chReset" type="button">Reset to Pip</button><span class="hint" id="chSaved" style="margin:0"></span></div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card"><h2>Made so far</h2><div id="epList"><div class="hint">No episodes yet.</div></div></div>
+</section>
+
 <!-- ======================= SERIES ======================= -->
 <section class="panel" id="tab-series" hidden>
   <h1>Multi-part series</h1>
@@ -391,7 +458,7 @@ footer{color:var(--muted);font-size:13px;text-align:center;padding:10px 20px 40p
 <script>
 const $ = id => document.getElementById(id);
 let timer = null, current = null, cfg = {has_key: false, ai_ready: false}, opts = null;
-let project = null, hooks = [], projectStory = null, seriesItems = [];
+let project = null, hooks = [], projectStory = null, seriesItems = [], epState = null;
 
 async function api(path, body) {
   const o = body ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)} : {};
@@ -418,6 +485,7 @@ function openTab(name) {
   document.querySelector('.grid').classList.toggle('solo', name === 'settings');
   if (name === 'library') loadVideos();
   if (name === 'series') loadSeries();
+  if (name === 'episodes') loadEpisodes();
   try { location.hash = name; } catch (e) {}
 }
 document.querySelectorAll('.tab').forEach(t => t.onclick = () => openTab(t.dataset.tab));
@@ -590,6 +658,11 @@ async function poll(id) {
       if (project && project.scenes[r.index]) project.scenes[r.index] = Object.assign({}, project.scenes[r.index], r.scene);
       renderEditor(); return;
     }
+    if (s.kind === 'ideas') {
+      await loadEpisodes();
+      setError((r.ideas || []).length ? '' : 'The model had no new ideas this time. Try again, or type your own.');
+      return;
+    }
     if (s.kind === 'series') {
       await loadSeries();
       setError(r.note ? 'Heads up: ' + r.note : '');
@@ -597,7 +670,7 @@ async function poll(id) {
     }
     show(r.name, r.title, r.description);
     setError((r.warnings || []).join('\n\n'));
-    loadVideos(); loadSeries();
+    loadVideos(); loadSeries(); loadEpisodes();
   } else if (s.state === 'error') {
     finish();
     if (s.kind === 'video') { $('phone').classList.remove('has'); $('phone').textContent = 'Your video will appear here'; }
@@ -851,13 +924,90 @@ async function makePart(s, i) {
   window.scrollTo({top: 0, behavior: 'smooth'});
 }
 
+// ------------------------------------------------------------ episodes
+const CH_FIELDS = [['chName', 'name'], ['chPronoun', 'pronoun'], ['chLook', 'look'], ['chArt', 'art_style'],
+  ['chPersonality', 'personality'], ['chWorld', 'world'], ['chSidekicks', 'sidekicks'], ['chSound', 'success_sound'],
+  ['chSoundFile', 'sound_file'], ['chVoice', 'voice'], ['chSeconds', 'seconds'], ['chSeed', 'seed']];
+function fillCharacter(ch) {
+  $('chVoice').innerHTML = epState.voices.map(v => `<option value="${v[0]}">${v[1]}</option>`).join('');
+  CH_FIELDS.forEach(([id, k]) => $(id).value = ch[k] == null ? '' : ch[k]);
+  $('chSpeaks').checked = !!ch.speaks;
+  $('chIdeas').value = (ch.ideas || []).join('\n');
+  $('charSum').textContent = 'Main character: ' + ch.name;
+  $('epHead').textContent = ch.name + "'s episodes";
+}
+function readCharacter() {
+  const ch = {speaks: $('chSpeaks').checked, ideas: $('chIdeas').value.split('\n')};
+  CH_FIELDS.forEach(([id, k]) => ch[k] = $(id).value);
+  return ch;
+}
+function updateEpLength() { $('epLengthVal').textContent = $('epLength').value + ' seconds'; }
+$('epLength').oninput = updateEpLength;
+async function loadEpisodes(keepIdea) {
+  const st = await api('/api/episodes');
+  if (st.error) return;
+  const first = !epState;
+  epState = st;
+  const ch = st.character;
+  fillCharacter(ch);
+  $('epNum').textContent = 'Episode ' + st.next_number;
+  $('makeEp').textContent = 'Make episode ' + st.next_number;
+  if (!keepIdea && (first || !$('epIdea').value.trim())) $('epIdea').value = st.ideas_left[0] || '';
+  if (first) { $('epLength').value = ch.seconds; updateEpLength(); }
+  $('epIdea').placeholder = 'e.g. ' + ch.name + ' climbs the bookshelf to see the sunrise';
+  $('epAiNotice').hidden = !!cfg.ai_ready;
+  const box = $('epIdeas'); box.innerHTML = '';
+  st.ideas_left.slice(0, 6).forEach(i => {
+    const [t, ...rest] = i.split(':');
+    const c = el('button', {class: 'chip', type: 'button'}, rest.length ? el('small', {}, t) : '', rest.length ? rest.join(':').trim() : i);
+    c.onclick = () => { $('epIdea').value = i; };
+    box.append(c);
+  });
+  const list = $('epList'); list.innerHTML = '';
+  if (!st.episodes.length) { list.append(el('div', {class: 'hint'}, 'No episodes yet. Make the first one above.')); return; }
+  st.episodes.slice().reverse().forEach(e => {
+    const acts = el('div', {class: 'pa'});
+    if (e.video) acts.append(el('button', {class: 'ghost', type: 'button', onclick: () => show(e.video, e.title, e.idea)}, 'Watch'));
+    acts.append(el('button', {class: 'ghost partbtn', type: 'button', onclick: () => makeEpisode(e.idea, e.number)}, 'Remake'));
+    acts.append(miniBtn('Remove', async () => { await api('/api/episodes/delete', {number: e.number}); loadEpisodes(true); }, false, 'Remove from the list'));
+    list.append(el('div', {class: 'part made'}, el('div', {class: 'n'}, String(e.number)),
+      el('div', {}, el('b', {}, e.title || ('Episode ' + e.number)), el('div', {class: 'hint'}, e.idea || '')), acts));
+  });
+}
+async function makeEpisode(idea, number) {
+  setError('');
+  if (!idea) { setError('Type what happens in this episode first.'); return; }
+  const body = Object.assign(lookBody(), {idea, episode_idea: idea, seconds: +$('epLength').value, image_style: 'auto'});
+  if (cfg.ai_ready) body.mode = 'ai_images';
+  if (number) body.episode_number = number;
+  const res = await api('/api/generate', body);
+  if (res.error) { setError(res.error); return; }
+  watch(res.id, 'Making episode ' + (number || epState.next_number) + '...', [{label: 'Write the script', state: 'active'}]);
+  waitingPhone();
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+$('makeEp').onclick = () => makeEpisode($('epIdea').value.trim());
+$('epSuggest').onclick = async () => {
+  const res = await api('/api/episodes/ideas', {});
+  if (res.error) { setError(res.error); return; }
+  watch(res.id, 'Thinking up new adventures...');
+};
+$('epSetupBtn').onclick = () => $('setupBtn').click();
+$('chSave').onclick = async () => {
+  const st = await api('/api/character/save', {character: readCharacter()});
+  if (st.error) { setError(st.error); return; }
+  $('chSaved').textContent = 'Saved.'; setTimeout(() => $('chSaved').textContent = '', 2500);
+  loadEpisodes(true);
+};
+$('chReset').onclick = async () => { await api('/api/character/reset', {}); loadEpisodes(true); };
+
 // ------------------------------------------------------------ start
 (async () => {
   await loadOptions();
   await loadSettings();
   loadUnfinished(); loadVideos();
   const h = (location.hash || '').slice(1);
-  openTab(['create', 'series', 'library', 'settings'].includes(h) ? h : 'create');
+  openTab(['episodes', 'create', 'series', 'library', 'settings'].includes(h) ? h : 'episodes');
 })();
 </script>
 </body>
